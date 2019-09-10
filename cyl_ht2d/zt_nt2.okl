@@ -1,0 +1,26 @@
+// Boundary conditions
+/* wall 1, inflow 2, outflow 3, x-slip 4, y-slip 5, z-slip 6 */
+void insVelocityDirichletConditions3D(bcData *bc)
+{                                                                        
+  bc->uP = 1.f;
+  bc->vP = 0.f;
+  bc->wP = 0.f;
+}
+
+void insVelocityNeumannConditions3D(bcData *bc)
+{                                                           
+}
+
+void insPressureDirichletConditions3D(bcData *bc)
+{
+}
+
+
+/* // ToDo: temperature
+void insTemperatureDirichletCondition3D(bcData *ba)
+{
+  bc->tP = 0.f
+  rad = sqrt(x*x+y*y)
+  if (rad.lt.0.6) temp=1.f
+}
+*/
