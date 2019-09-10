@@ -1,0 +1,36 @@
+@kernel void setDpDy(const dlong Ntotal,
+                     const dlong offset,
+                     @restrict dfloat * TEMP,
+                     @restrict dfloat * NU)
+{
+  for(dlong n=0;n<Ntotal;++n;@tile(256,@outer,@inner)){
+    if(n<Ntotal){
+      const dlong id = n + 1*offset;
+      NU[id] = TEMP[id];
+    }
+  }
+}
+
+
+
+// Boundary conditions
+/* wall 1, inflow 2, outflow 3, x-slip 4, y-slip 5, z-slip 6 */
+void insVelocityDirichletConditions3D(bcData *bc)
+{                                                                        
+  bc->uP = 0.f;
+  bc->vP = 0.f;
+  bc->wP = 0.f;
+}
+
+void insVelocityNeumannConditions3D(bcData *bc)
+{                                                           
+}
+
+void insPressureDirichletConditions3D(bcData *bc)
+{
+  dfloat diam_outer = 1.f
+       , rad_outer  = diam_outer / 2.f
+       , rad_inner  = rad_outer / 3.f
+       , rad_mid    = 0.5f * (rad_inner + rad_outer) ! For BC discrimination 
+  //if (rad.lt.rad_mid) temp = 1. // ToDo: add a loop
+}
