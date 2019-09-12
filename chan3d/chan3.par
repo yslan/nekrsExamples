@@ -1,0 +1,24 @@
+[OCCA]
+backend = CUDA
+deviceNumber = 0 #LOCAL-RANK
+
+[GENERAL] 
+polynomialOrder = 7
+stopAt = endTime
+endTime = 10.0
+dt = 1e-02
+timeStepper = bdf2
+writeControl = runTime
+writeInterval = 0.1
+
+[PRESSURE]
+preconditioner = semg_amg
+residualTol = 1e-06
+
+[VELOCITY]
+residualTol = 1e-7
+viscosity = -1000
+
+[TEMPERATURE]
+residualTol = 1e-7
+conductivity = -1000

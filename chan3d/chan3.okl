@@ -1,0 +1,26 @@
+// Boundary conditions
+/* wall 1, inflow 2, outflow 3, x-slip 4, y-slip 5, z-slip 6 */
+void insVelocityDirichletConditions3D(bcData *bc)
+{                                                                        
+  bc->uP = 1.f;
+  bc->vP = 0.f;
+  bc->wP = 0.f;
+}
+void cdsDirichletConditions3D(bcData *bc)
+{                                                                        
+  bc->sP = 0.f;
+  if(bc->id==1){
+    bc->sP = 1.f;
+  }
+}
+
+void insVelocityNeumannConditions3D(bcData *bc)
+{                                                           
+}
+
+void insPressureDirichletConditions3D(bcData *bc)
+{
+}
+void cdsNeumannConditions3D(bcData *bc)
+{                                                           
+}
