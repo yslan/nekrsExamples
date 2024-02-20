@@ -1,5 +1,9 @@
 ## pb146, turb outflow
 
+Enable user to use `turb_outflow` in nekrs.
+The wall distance (only for the last layer) is still computed in userchk but the qtl is updated at each step on the GPU.
+
+
 Using v23-rc (rep/next, cloned at 05/28/23)
 
 - Dong's outflow     
