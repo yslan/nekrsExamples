@@ -1,5 +1,6 @@
 # NekrsExamples
-My own collactions of NekRS examples. 
+My own collactions of NekRS examples.     
+Here we focus on porting Nek5000 functionality into NekRS
 
 - turbOutflow        
   use nek5000's `turb_outflow` in nekrs   
