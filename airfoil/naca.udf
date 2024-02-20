@@ -1,0 +1,288 @@
+//
+// nekRS User Defined File
+//
+#include "udf.hpp"
+#include "postProcessing.hpp"
+
+#ifdef __okl__
+
+#include "naca.oudf"
+#include "my_drag.oudf"
+
+#endif
+
+static dfloat P_VISC, P_U0, P_AOA, P_COS_AOA, P_SIN_AOA;
+occa::memory o_visco;
+
+dfloat *dragvx, *dragvy, *dragvz;
+occa::memory o_dragvx, o_dragvy, o_dragvz;
+
+dfloat *dragpx, *dragpy, *dragpz;
+occa::memory o_dragpx, o_dragpy, o_dragpz;
+
+struct Force {
+  dfloat x;
+  dfloat y;
+  dfloat z;
+};
+
+
+void uservp(nrs_t *nrs, dfloat time, occa::memory o_U, occa::memory o_S,
+            occa::memory o_UProp, occa::memory o_SProp)
+{
+  userVp(nrs->meshV->Nelements,
+               nrs->fieldOffset,
+               P_VISC,
+               o_visco,
+               o_UProp);
+}
+
+void userf(nrs_t *nrs, dfloat time, occa::memory o_U, occa::memory o_FU)
+{
+  fillFU(nrs->meshV->Nlocal, nrs->fieldOffset, nrs->o_FU);
+}
+
+/* Viscous Drag and Pressure Drag */
+Force compute_dragv(nrs_t *nrs, int nbID, const occa::memory& o_bID, occa::memory &o_Sij, const dfloat scale)
+{
+  mesh_t *mesh = nrs->meshV;
+  Force dragv;
+
+  if(o_dragvx.size() == 0) {
+    dragvx = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    dragvy = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    dragvz = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    o_dragvx = platform->device.malloc<dfloat>(mesh->Nelements);
+    o_dragvy = platform->device.malloc<dfloat>(mesh->Nelements);
+    o_dragvz = platform->device.malloc<dfloat>(mesh->Nelements);
+  }
+
+  dragvKernel(mesh->Nelements,
+       nrs->fieldOffset,
+       nbID,
+       o_bID,
+       mesh->o_sgeo,
+       mesh->o_vmapM,
+       mesh->o_EToB,
+       nrs->o_mue,
+       o_Sij,
+       o_dragvx,
+       o_dragvy,
+       o_dragvz);
+
+  o_dragvx.copyTo(dragvx);
+  o_dragvy.copyTo(dragvy);
+  o_dragvz.copyTo(dragvz);
+
+  dragv.x=0.0;
+  dragv.y=0.0;
+  dragv.z=0.0;
+  for (dlong i = 0; i < mesh->Nelements; i++) {
+    dragv.x += dragvx[i];
+    dragv.y += dragvy[i];
+    dragv.z += dragvz[i];
+  }
+  MPI_Allreduce(MPI_IN_PLACE, &dragv.x, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  MPI_Allreduce(MPI_IN_PLACE, &dragv.y, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  MPI_Allreduce(MPI_IN_PLACE, &dragv.z, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  dragv.x *= scale;
+  dragv.y *= scale;
+  dragv.z *= scale;
+
+  return dragv;
+}
+
+Force compute_dragp(nrs_t *nrs, int nbID, const occa::memory& o_bID, occa::memory &o_P, const dfloat scale)
+{
+  mesh_t *mesh = nrs->meshV;
+  Force dragp;
+
+  if(o_dragpx.size() == 0) {
+    dragpx = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    dragpy = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    dragpz = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    o_dragpx = platform->device.malloc<dfloat>(mesh->Nelements);
+    o_dragpy = platform->device.malloc<dfloat>(mesh->Nelements);
+    o_dragpz = platform->device.malloc<dfloat>(mesh->Nelements);
+  }                   
+                      
+  dragpKernel(mesh->Nelements,
+       nrs->fieldOffset,
+       nbID, 
+       o_bID,
+       mesh->o_sgeo,
+       mesh->o_vmapM, 
+       mesh->o_EToB,
+       o_P,
+       o_dragpx,
+       o_dragpy, 
+       o_dragpz);
+  
+  o_dragpx.copyTo(dragpx);
+  o_dragpy.copyTo(dragpy);
+  o_dragpz.copyTo(dragpz);
+              
+  dragp.x=0.0;
+  dragp.y=0.0;
+  dragp.z=0.0;
+  for (dlong i = 0; i < mesh->Nelements; i++) {
+    dragp.x += dragpx[i];
+    dragp.y += dragpy[i];
+    dragp.z += dragpz[i];
+  }
+  MPI_Allreduce(MPI_IN_PLACE, &dragp.x, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  MPI_Allreduce(MPI_IN_PLACE, &dragp.y, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  MPI_Allreduce(MPI_IN_PLACE, &dragp.z, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  dragp.x *= scale;
+  dragp.y *= scale;
+  dragp.z *= scale;
+
+  return dragp;
+} 
+
+
+/* UDF Functions */
+void UDF_LoadKernels(occa::properties &kernelInfo)
+{
+  kernelInfo["defines/p_PI"] = M_PI;
+  kernelInfo["defines/p_U0"] = P_U0;
+  kernelInfo["defines/p_COS_AOA"] = P_COS_AOA;
+  kernelInfo["defines/p_SIN_AOA"] = P_SIN_AOA;
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  options.getArgs("VISCOSITY", P_VISC);
+  platform->par->extract("casedata", "p_u0", P_U0);
+  platform->par->extract("casedata", "p_aoa", P_AOA);
+
+  P_COS_AOA = cos(P_AOA * M_PI/180.0);
+  P_SIN_AOA = sin(P_AOA * M_PI/180.0);
+
+  // snap to 0 or 90
+  if (fabs(P_AOA)<0.0001) {
+    P_AOA = 0.0;
+    P_COS_AOA = 1.0;
+    P_SIN_AOA = 0.0;
+  } else if (fabs(P_AOA-90.0)<0.0001) {
+    P_AOA = 90.0;
+    P_COS_AOA = 0.0;
+    P_SIN_AOA = 1.0;
+  }
+  if (platform->comm.mpiRank == 0)
+    printf("chk(rs) u0: %g aoa: %g %g %g\n",P_U0,P_AOA,P_COS_AOA,P_SIN_AOA);
+
+  if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+    double *const nek_cb_scnrs = (double *)nek::ptr("cb_scnrs");
+    nek_cb_scnrs[0] = P_U0;
+    nek_cb_scnrs[1] = P_AOA;
+    nek_cb_scnrs[2] = P_COS_AOA;
+    nek_cb_scnrs[3] = P_SIN_AOA;
+  }
+}
+
+void UDF_Setup(nrs_t *nrs)
+{
+  mesh_t *mesh = nrs->meshV;
+  o_visco = platform->device.malloc<dfloat>(nrs->fieldOffset);
+  platform->linAlg->fill(mesh->Nlocal, 0.0, o_visco);
+
+  udf.uEqnSource = &userf;
+  udf.properties = &uservp;
+}
+
+void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
+{
+  mesh_t *mesh = nrs->meshV;
+  cds_t *cds = nrs->cds;
+
+  occa::memory o_Ux = nrs->o_U + 0*nrs->fieldOffset;
+  occa::memory o_Uy = nrs->o_U + 1*nrs->fieldOffset;
+  occa::memory o_Uz = nrs->o_U + 2*nrs->fieldOffset;
+  occa::memory o_Pr = nrs->o_P;
+
+  // chk volume flow rate
+  const dfloat ubar = platform->linAlg->innerProd(mesh->Nlocal, o_Ux, mesh->o_LMM, platform->comm.mpiComm)/mesh->volume;
+  const dfloat ebar = platform->linAlg->weightedNorm2Many(mesh->Nlocal, 3, nrs->fieldOffset, mesh->o_LMM,  nrs->o_U,  platform->comm.mpiComm) / sqrt(mesh->volume); // sqrt( int ux^2+uy^2+uz^2 / volume )
+
+  if (platform->comm.mpiRank == 0) 
+    printf("chk(rs) bar: %d %g %g %g",tstep,time,ubar,ebar);
+
+  // chk min/max
+  const dfloat vxmin = platform->linAlg->min(mesh->Nlocal, o_Ux, platform->comm.mpiComm);
+  const dfloat vymin = platform->linAlg->min(mesh->Nlocal, o_Uy, platform->comm.mpiComm);
+  const dfloat vzmin = platform->linAlg->min(mesh->Nlocal, o_Uz, platform->comm.mpiComm);
+  const dfloat prmin = platform->linAlg->min(mesh->Nlocal, o_Pr, platform->comm.mpiComm);
+  const dfloat vxmax = platform->linAlg->max(mesh->Nlocal, o_Ux, platform->comm.mpiComm);
+  const dfloat vymax = platform->linAlg->max(mesh->Nlocal, o_Uy, platform->comm.mpiComm);
+  const dfloat vzmax = platform->linAlg->max(mesh->Nlocal, o_Uz, platform->comm.mpiComm);
+  const dfloat prmax = platform->linAlg->max(mesh->Nlocal, o_Pr, platform->comm.mpiComm);
+  if (platform->comm.mpiRank == 0) {
+    printf(" Vx: %g %g", vxmin, vxmax);
+    printf(" Vy: %g %g", vymin, vymax);
+    printf(" Vz: %g %g", vzmin, vzmax);
+    printf(" Pr: %g %g", prmin, prmax);
+    printf("\n");
+  }  
+
+  // compute drag
+  std::vector<int> bidWall = {3};
+  occa::memory o_bidWall = platform->device.malloc<int>(bidWall.size(), bidWall.data());
+
+  const dfloat scale = 2.0; // CD = F/(.5 rho U^2 ) = 2*F
+  auto o_Sij = platform->o_memPool.reserve<dfloat>(2 * nrs->NVfields * nrs->fieldOffset);
+  postProcessing::strainRate(nrs, false, nrs->o_U, o_Sij); // "false" is correct
+  platform->linAlg->scaleMany(mesh->Nlocal, 6, nrs->fieldOffset, 2.0, o_Sij, 0); // Nek5k's Sij is 2x than nekrs one
+
+  // dbg print
+/*
+  std::vector<dfloat> sij_min(6,99.0e20);
+  std::vector<dfloat> sij_max(6,-99.0e20);
+  for (int i=0;i<6;i++) {
+    auto o_Sij_tmp = o_Sij + i*nrs->fieldOffset;
+    sij_min[i] = platform->linAlg->min(mesh->Nlocal, o_Sij_tmp, platform->comm.mpiComm);
+    sij_max[i] = platform->linAlg->max(mesh->Nlocal, o_Sij_tmp, platform->comm.mpiComm);
+  }
+  if (platform->comm.mpiRank == 0) {
+    printf("(rs)sij_min %d %.8e",tstep,time);
+    for (int i=0;i<6;i++) 
+      printf(" %.8e",sij_min[i]);
+    printf("\n");
+
+    printf("(rs)sij_max %d %.8e",tstep,time);
+    for (int i=0;i<6;i++) 
+      printf(" %.8e",sij_max[i]);
+    printf("\n");
+  }  
+  dfloat visc_min = platform->linAlg->min(mesh->Nlocal, nrs->o_mue, platform->comm.mpiComm);
+  dfloat visc_max = platform->linAlg->max(mesh->Nlocal, nrs->o_mue, platform->comm.mpiComm);
+  if (platform->comm.mpiRank == 0) {
+    printf("(rs)visc    %d %.8e %.8e %.8e\n",tstep,time,visc_min,visc_max);
+  }   
+*/
+
+  // vol flow rate is not implemented (p55)
+  // Need to check variable viscosity
+  Force dragv = compute_dragv(nrs, bidWall.size(), o_bidWall, o_Sij, scale);
+  Force dragp = compute_dragp(nrs, bidWall.size(), o_bidWall, nrs->o_P, scale);
+  o_Sij.free();
+
+  Force drag;
+  drag.x = dragp.x + dragv.x;
+  drag.y = dragp.y + dragv.y;
+  drag.z = dragp.z + dragv.z;
+
+  if (platform->comm.mpiRank == 0) { // match with nek5000's torque_calc after first step.
+    printf("%d %.8e %.8e %.8e %.8e dragx(rs)\n",tstep,time,drag.x,dragp.x,dragv.x);
+    printf("%d %.8e %.8e %.8e %.8e dragy(rs)\n",tstep,time,drag.y,dragp.y,dragv.y);
+    printf("%d %.8e %.8e %.8e %.8e dragz(rs)\n",tstep,time,drag.z,dragp.z,dragv.z);
+  }
+
+  if (tstep % 10 == 0) { // TODO: copy viscosity to nek5000 for drag
+     double *visc = (double *)nek::scPtr(1);
+     nrs->o_mue.copyTo(visc, mesh->Nlocal);
+
+     nek::ocopyToNek(time, tstep);
+     nek::userchk();
+  }
+}

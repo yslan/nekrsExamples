@@ -1,0 +1,236 @@
+c-----------------------------------------------------------------------
+      subroutine useric(i,j,k,eg) ! set up initial conditions
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+      integer i,j,k,e,eg
+
+      ux   = 0.0
+      uy   = 0.0
+      uz   = 1.0
+      temp = 0.0
+  
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userchk
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+
+      COMMON /NRSSCPTR/ nrs_scptr(1)
+      integer*8         nrs_scptr
+      
+      real dist
+      common /my_walldist/ dist(lx1,ly1,lz1,lelv)
+      character*3 cb
+
+      integer ie,iface
+      logical ifout
+
+      integer ifld,loglevel_bak
+
+      real*8 etime1,etime2,dnekclock
+
+      nrs_scptr(1) = loc(dist(1,1,1,1))
+
+      if (istep.eq.0) then
+         loglevel_bak = loglevel
+         loglevel = 3
+
+c         ! Implementation 1: 197.12 sec
+c         etime1 = dnekclock()
+c         ifld = 1
+c         cb = 'o  '
+c         call cheap_dist(dist,ifld,cb)
+c
+c         ! set d=-1 if element has no outflow
+c         do ie=1,nelv
+c            ifout = .false.
+c            do iface=1,2*ldim
+c               if (cbc(iface,ie,ifld).eq.cb) ifout = .true.
+c            enddo
+c            if (.not.ifout) call cfill(dist(1,1,1,ie),-1.0,lx1*ly1*lz1)
+c         enddo
+c         etime1 = dnekclock() - etime1
+
+         ! Implementation 2: 0.33 sec
+         etime2 = dnekclock()
+         ifld = 1
+         cb = 'o  '
+         call my_cheap_dist_1lyr(dist,ifld,cb)
+         etime2 = dnekclock() - etime2
+
+         loglevel = loglevel_bak
+      endif
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat   ! This routine to modify element vertices
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat3
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat2
+      include 'SIZE'
+      include 'TOTAL'
+      integer e,f
+
+      ! rescale to R_pebble = 1
+      n=lx1*ly1*lz1*nelv
+      scale=1.0/1.5
+      do i=1,n
+        xm1(i,1,1,1)=xm1(i,1,1,1)*scale
+        ym1(i,1,1,1)=ym1(i,1,1,1)*scale
+        zm1(i,1,1,1)=zm1(i,1,1,1)*scale
+      enddo
+
+      do iel=1,nelt
+      do ifc=1,2*ndim
+         if (cbc(ifc,iel,1) .eq. 'v  ') boundaryID(ifc,iel) = 1
+         if (cbc(ifc,iel,1) .eq. 'O  ') then
+            boundaryID(ifc,iel) = 2
+            cbc(ifc,iel,1) = 'o  '
+         endif
+         if (cbc(ifc,iel,1) .eq. 'SYM') boundaryID(ifc,iel) = 3
+         if (cbc(ifc,iel,1) .eq. 'W  ') boundaryID(ifc,iel) = 4
+      enddo
+      enddo
+
+      do e=1,nelv
+      do f=1,2*ndim
+        if(cbc(f,e,1) .eq. 'SYM') cbc(f,e,1)='W  ' 
+      enddo
+      enddo
+
+      return
+      end
+c-----------------------------------------------------------------------
+
+c-----------------------------------------------------------------------
+      subroutine my_cheap_dist_1lyr(d,ifld,b)
+
+c     Finds a pseudo-distance function.
+
+c     INPUT:  ifld - field type for which distance function is to be found.
+c             ifld = 1 for velocity
+c             ifld = 2 for temperature, etc.
+
+c     OUTPUT: d = "path" distance to nearest wall
+
+c     This approach has a significant advantage that it works for
+c     periodict boundary conditions, whereas most other approaches
+c     will not.
+      
+      include 'SIZE'       
+      include 'GEOM'       ! Coordinates
+      include 'INPUT'      ! cbc()
+      include 'TSTEP'      ! nelfld
+      include 'PARALLEL'   ! gather-scatter handle for field "ifld"
+      
+      real d(lx1,ly1,lz1,lelt)
+      
+      character*3 b  ! Boundary condition of interest
+      
+      integer e,eg,f
+      logical ifebc
+      
+      nel = nelfld(ifld)
+      n = lx1*ly1*lz1*nel
+      
+      call domain_size(xmin,xmax,ymin,ymax,zmin,zmax)
+      
+      xmn = min(xmin,ymin)
+      xmx = max(xmax,ymax)
+      if (if3d) xmn = min(xmn ,zmin)
+      if (if3d) xmx = max(xmx ,zmax)
+      
+      big = 10*(xmx-xmn)
+      call cfill(d,big,n)
+      
+      nface = 2*ldim 
+      do e=1,nel     ! Set d=0 on walls
+      do f=1,nface
+         if (cbc(f,e,ifld).eq.b) call facev(d,e,f,0.,lx1,ly1,lz1)
+      enddo
+      enddo
+      
+      do ipass=1,10000
+         dmax    = 0
+         nchange = 0
+         do e=1,nel
+           ifebc = .false.
+           do f=1,nface
+             if (cbc(f,e,ifld).eq.b) ifebc = .true. 
+           enddo
+           if (ifebc) then
+             do k=1,lz1 
+             do j=1,ly1 
+             do i=1,lx1 
+               i0=max(  1,i-1)
+               j0=max(  1,j-1)
+               k0=max(  1,k-1)
+               i1=min(lx1,i+1)
+               j1=min(ly1,j+1)
+               k1=min(lz1,k+1)
+               do kk=k0,k1
+               do jj=j0,j1
+               do ii=i0,i1
+  
+                if (if3d) then
+                 dtmp = d(ii,jj,kk,e) + dist3d(
+     $             xm1(ii,jj,kk,e),ym1(ii,jj,kk,e),zm1(ii,jj,kk,e)
+     $            ,xm1(i ,j ,k ,e),ym1(i ,j ,k ,e),zm1(i ,j ,k ,e))
+                else
+                 dtmp = d(ii,jj,kk,e) + dist2d(
+     $             xm1(ii,jj,kk,e),ym1(ii,jj,kk,e)
+     $            ,xm1(i ,j ,k ,e),ym1(i ,j ,k ,e))
+                endif
+  
+                if (dtmp.lt.d(i,j,k,e)) then
+                  d(i,j,k,e) = dtmp
+                  nchange = nchange+1
+                  dmax = max(dmax,d(i,j,k,e))
+                endif
+               enddo
+               enddo
+               enddo
+  
+             enddo
+             enddo
+             enddo
+           else  ! ifebc
+             call cfill(d(1,1,1,e),big,lx1*ly1*lz1)
+           endif ! ifebc
+         enddo
+         call fgslib_gs_op(gsh_fld(ifld),d,1,3,0) ! min over all elements
+         nchange = iglsum(nchange,1)
+         dmax = glmax(dmax,1)
+         if (nio.eq.0.and.loglevel.gt.2) write(6,1) ipass,nchange,dmax,b
+    1    format(i9,i12,1pe12.4,' max distance b: ',a3)
+         if (nchange.eq.0) goto 1000
+      enddo
+ 1000 continue
+      do e=1,nel
+        ifebc = .false.
+        do f=1,nface
+          if (cbc(f,e,ifld).eq.b) ifebc = .true.                     
+        enddo
+        if (.not.ifebc) then
+          call cfill(d(1,1,1,e),-1.0,lx1*ly1*lz1)
+        endif
+      enddo
+
+      return
+      end
+c-----------------------------------------------------------------------

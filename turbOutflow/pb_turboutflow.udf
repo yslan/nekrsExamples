@@ -1,0 +1,76 @@
+//
+// nekRS User Defined File
+//
+#include "udf.hpp"
+
+#ifdef __okl__
+
+#include "pb.oudf"
+
+#endif
+
+
+/* for turb outflow */
+static occa::memory o_dist;
+static occa::memory o_mask;
+static dfloat ddmax, volu;
+static int updateDistFunc = 1;  
+
+void qtl(nrs_t *nrs, dfloat time, occa::memory o_div)
+{
+  mesh_t* mesh = nrs->meshV;
+         
+  const dfloat rq = 2.0; 
+         
+  if (updateDistFunc==1) {
+      
+    dfloat *dist = (double*) nek::scPtr(1);
+    o_dist.copyFrom(dist,mesh->Nlocal*sizeof(dfloat));
+      
+    ddmax = platform->linAlg->max(nrs->meshV->Nlocal, o_dist, platform->comm.mpiComm);
+
+    // msk=1.0, d=0,                   if d<0, meaning this element has no outflow BC
+    // msk=0.0, d = (ddmax-d)/ddmax    otherwise
+    turbOutflowSetup(o_mask, o_dist, ddmax, mesh->Nlocal);
+
+    volu  = platform->linAlg->innerProd(nrs->meshV->Nlocal, mesh->o_LMM, o_mask, platform->comm.mpiComm, 0);
+
+    if (platform->comm.mpiRank == 0) {
+      printf("turboutflow setup ddmax = %g, volu = %g\n",ddmax,volu);
+    }
+
+    updateDistFunc = 0;
+  }
+
+  occa::memory o_UX = nrs->o_U + 0*nrs->fieldOffset * sizeof(dfloat);
+  occa::memory o_UY = nrs->o_U + 1*nrs->fieldOffset * sizeof(dfloat);
+  occa::memory o_UZ = nrs->o_U + 2*nrs->fieldOffset * sizeof(dfloat);
+
+  dfloat ubar = platform->linAlg->weightedInnerProd(nrs->meshV->Nlocal, o_UX, mesh->o_LMM, o_mask, platform->comm.mpiComm);
+  dfloat vbar = platform->linAlg->weightedInnerProd(nrs->meshV->Nlocal, o_UY, mesh->o_LMM, o_mask, platform->comm.mpiComm);
+  dfloat wbar = platform->linAlg->weightedInnerProd(nrs->meshV->Nlocal, o_UZ, mesh->o_LMM, o_mask, platform->comm.mpiComm);
+
+  ubar = (fabs(ubar) + fabs(vbar) + fabs(wbar)) / volu;
+  dfloat cs = 3.*(rq-1.)*(ubar/ddmax);
+  turbOutflow(o_div, o_dist, cs, mesh->Nlocal); // div = cs * d^2
+}
+
+
+void UDF_Setup(nrs_t *nrs)
+{     
+  o_dist = platform->device.malloc(nrs->fieldOffset, sizeof(dfloat));
+  o_mask = platform->device.malloc(nrs->fieldOffset, sizeof(dfloat));
+
+  udf.div = &qtl;
+}
+
+
+void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
+{   
+/*
+  if (nrs->isOutputStep) {
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+*/
+}

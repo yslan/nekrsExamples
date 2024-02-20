@@ -1,0 +1,247 @@
+// copied from kernels/postProcessing/drag.okl
+
+#define REDUCE(bs)                                                                                           \
+if (t < bs) {                                                                                                \
+s_sum_x[t] += s_sum_x[t + bs];                                                                                   \
+s_sum_y[t] += s_sum_y[t + bs];                                                                                   \
+s_sum_z[t] += s_sum_z[t + bs];                                                                                   \
+}
+
+@kernel void dragvKernel(const dlong Nelements,
+                         const dlong offset,
+                         const dlong nbID,
+                         const dlong *bID,
+                         @ restrict const dfloat *sgeo,
+                         @ restrict const dlong *vmapM,
+                         @ restrict const int *EToBM,
+                         @ restrict const dfloat *mue,
+                         @ restrict const dfloat *SIJ,
+                         @ restrict dfloat *sum_x,
+                         @ restrict dfloat *sum_y,
+                         @ restrict dfloat *sum_z)
+{
+  for (dlong e = 0; e < Nelements; e++; @outer(0)) {
+    @shared dfloat s_sum_x[p_blockSize];
+    @shared dfloat s_sum_y[p_blockSize];
+    @shared dfloat s_sum_z[p_blockSize];
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      s_sum_x[t] = 0.0;
+      s_sum_y[t] = 0.0;
+      s_sum_z[t] = 0.0;
+      if (t < p_Nfp) {
+        for (int f = 0; f < p_Nfaces; f++) {
+          const dlong bIDM = EToBM[f + p_Nfaces * e];
+
+          for (int ibID = 0; ibID < nbID; ibID++) {
+            if (bIDM == bID[ibID]) {
+              const int n = t + f * p_Nfp;
+              const dlong sid = e * p_Nfaces * p_Nfp + n;
+
+              const dlong idM = vmapM[sid];
+              const dfloat sWJ = sgeo[sid * p_Nsgeo + p_WSJID];
+
+              const dfloat n1 = sgeo[sid * p_Nsgeo + p_NXID];
+              const dfloat n2 = sgeo[sid * p_Nsgeo + p_NYID];
+              const dfloat n3 = sgeo[sid * p_Nsgeo + p_NZID];
+
+              const dfloat s11 = SIJ[idM + 0 * offset];
+              const dfloat s21 = SIJ[idM + 3 * offset];
+              const dfloat s31 = SIJ[idM + 5 * offset];
+
+              const dfloat s12 = s21;
+              const dfloat s22 = SIJ[idM + 1 * offset];
+              const dfloat s32 = SIJ[idM + 4 * offset];
+
+              const dfloat s13 = s31;
+              const dfloat s23 = s32;
+              const dfloat s33 = SIJ[idM + 2 * offset];
+
+              const dfloat scale = - mue[idM] * sWJ;
+
+              const dfloat dragx = scale*(s11 * n1 + s12 * n2 + s13 * n3);
+              const dfloat dragy = scale*(s21 * n1 + s22 * n2 + s23 * n3);
+              const dfloat dragz = scale*(s31 * n1 + s32 * n2 + s33 * n3);
+
+              s_sum_x[t] += dragx;
+              s_sum_y[t] += dragy;
+              s_sum_z[t] += dragz;
+            }
+          }
+        }
+      }
+    }
+    @barrier();
+
+#if p_blockSize > 512
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(512);
+    }
+    @barrier();
+#endif
+
+#if p_blockSize > 256
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(256);
+    }
+    @barrier();
+#endif
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(128);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(64);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(32);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(16);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(8);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(4);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(2);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      if (t < 1) {
+        sum_x[e] = s_sum_x[0] + s_sum_x[1];
+        sum_y[e] = s_sum_y[0] + s_sum_y[1];
+        sum_z[e] = s_sum_z[0] + s_sum_z[1];
+      }
+    }
+    @barrier();
+  }
+}
+
+
+@kernel void dragpKernel(const dlong Nelements,
+                         const dlong offset,
+                         const dlong nbID,
+                         const dlong *bID,
+                         @ restrict const dfloat *sgeo,
+                         @ restrict const dlong *vmapM,
+                         @ restrict const int *EToBM,
+                         @ restrict const dfloat *PR,
+                         @ restrict dfloat *sum_x,
+                         @ restrict dfloat *sum_y,
+                         @ restrict dfloat *sum_z)
+{
+  for (dlong e = 0; e < Nelements; e++; @outer(0)) {
+    @shared dfloat s_sum_x[p_blockSize];
+    @shared dfloat s_sum_y[p_blockSize];
+    @shared dfloat s_sum_z[p_blockSize];
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      s_sum_x[t] = 0.0;
+      s_sum_y[t] = 0.0;
+      s_sum_z[t] = 0.0;
+      if (t < p_Nfp) {
+        for (int f = 0; f < p_Nfaces; f++) {
+          const dlong bIDM = EToBM[f + p_Nfaces * e];
+
+          for (int ibID = 0; ibID < nbID; ibID++) {
+            if (bIDM == bID[ibID]) {
+              const int n = t + f * p_Nfp;
+              const dlong sid = e * p_Nfaces * p_Nfp + n;
+
+              const dlong idM = vmapM[sid];
+              const dfloat sWJ = sgeo[sid * p_Nsgeo + p_WSJID];
+
+              const dfloat n1 = sgeo[sid * p_Nsgeo + p_NXID];
+              const dfloat n2 = sgeo[sid * p_Nsgeo + p_NYID];
+              const dfloat n3 = sgeo[sid * p_Nsgeo + p_NZID];
+              const dfloat pr = PR[idM];
+
+              const dfloat dragx = sWJ * pr * n1;
+              const dfloat dragy = sWJ * pr * n2;
+              const dfloat dragz = sWJ * pr * n3;
+
+              s_sum_x[t] += dragx;
+              s_sum_y[t] += dragy;
+              s_sum_z[t] += dragz;
+            }
+          }
+        }
+      }
+    }
+    @barrier();
+
+#if p_blockSize > 512
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(512);
+    }
+    @barrier();
+#endif
+
+#if p_blockSize > 256
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(256);
+    }
+    @barrier();
+#endif
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(128);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(64);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(32);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(16);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(8);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(4);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      REDUCE(2);
+    }
+    @barrier();
+
+    for (int t = 0; t < p_blockSize; ++t; @inner(0)) {
+      if (t < 1) {
+        sum_x[e] = s_sum_x[0] + s_sum_x[1];
+        sum_y[e] = s_sum_y[0] + s_sum_y[1];
+        sum_z[e] = s_sum_z[0] + s_sum_z[1];
+      }
+    }
+    @barrier();
+  }
+}
+
+#undef REDUCE

@@ -1,0 +1,55 @@
+// Boundary conditions
+void velocityDirichletConditions(bcData *bc)
+{
+  bc->u = p_U0 * p_COS_AOA;
+  bc->v = p_U0 * p_SIN_AOA;
+  bc->w = 0.0;
+}
+
+// Stabilized outflow (Dong et al)
+void pressureDirichletConditions(bcData *bc)
+{
+  const dfloat iU0delta = 20.0;
+  const dfloat un = bc->u * bc->nx + bc->v * bc->ny + bc->w * bc->nz;
+  const dfloat s0 = 0.5 * (1.0 - tanh(un * iU0delta));
+  bc->p = -0.5 * (bc->u * bc->u + bc->v * bc->v + bc->w * bc->w) * s0;
+}
+
+void scalarDirichletConditions(bcData *bc)
+{
+  if (bc->id == 1) {
+    bc->s = 0;
+  } else {
+    bc->s = 0.5 * (tanh((bc->z - 1.0) / 0.2) + 1.0); // smooth ramp
+  }
+}
+
+@kernel void fillFU(const dlong Ntotal,
+                    const dlong offset,
+                    @restrict dfloat * FU) {
+  for (dlong n=0;n<Ntotal;++n;@tile(p_blockSize,@outer,@inner)) {
+    if (n<Ntotal) {
+      FU[n + 0*offset] = 0.0;
+      FU[n + 1*offset] = 0.0;
+      FU[n + 2*offset] = 0.0;
+    }
+  }
+}
+
+@kernel void userVp(const dlong Nelements,
+                    const dlong uOffset,
+                    const dfloat visc,
+                    @restrict const dfloat * visco,
+                    @restrict dfloat * UPROP)
+{
+  for(dlong e=0;e<Nelements;++e;@outer(0)){
+    for(int n=0;n<p_Np;++n;@inner(0)){
+      const int id = e*p_Np + n;
+
+//      UPROP[id + 0*uOffset] = 1.0 * visc;
+      UPROP[id + 0*uOffset] = 1.0 * visc + visco[id];
+      UPROP[id + 1*uOffset] = 1.0;
+
+    }
+  }
+}

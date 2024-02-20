@@ -1,0 +1,82 @@
+#[OCCA]
+#backend = SERIAL
+#backend = CUDA
+#deviceNumber = LOCAL-RANK
+
+#[MESH]
+#connectivitytol = 0.1
+
+[GENERAL]
+#verbose = true
+polynomialOrder = 2
+startFrom = "base.fld"+UP
+#startFrom = "r2.fld"+UP
+#stopAt = endTime
+#endTime = 200
+stopAt = numSteps
+numSteps = 100
+
+dt = targetCFL=1.0 + max=1e-2 + initial=1e-6
+timeStepper = tombo2
+subCyclingSteps = 2
+
+#writeControl = simulationTime 
+#writeInterval = 10.0
+writeControl = steps 
+writeInterval = -1 #1000
+
+regularization = hpfrt + nModes=1 + scalingCoeff=10
+
+[PRESSURE]
+solver = pgmres+nVector=20 #pfcg
+residualTol = 1e-04
+#maxIterations = 200
+
+initialGuess = projectionAconj+nVector=20
+#initialGuess = previous
+
+
+# Prec Test, Lan
+# SEMG
+preconditioner = multigrid
+smootherType = RAS+FourthOptChebyshev #+maxEigenvalueBoundFactor=1.1
+#smootherType = JAC+Chebyshev
+
+# SEMG: crs = FEM
+#coarseSolver = xxt
+#coarseSolver = box
+#coarseSolver = boomerAMG+cpu
+#coarseSolver = boomerAMG+device
+#coarseSolver = AmgX+device
+
+# SEMG: crs = SEMFEM
+#coarseGridDiscretization = SEMFEM
+#coarseSolver = boomerAMG+cpu
+#coarseSolver = boomerAMG+device
+#coarseSolver = AmgX+device
+
+# SEMFEM
+#preconditioner = semfem
+#coarseSolver = boomerAMG+cpu #AmgX
+#coarseSolver = boomerAMG+device
+#coarseSolver = AmgX+device
+
+#[AMGX]
+#configFile = "amgx.json"
+
+
+[VELOCITY]
+#solver = pfcg+block
+boundaryTypeMap = inlet, outlet, wall, sym
+density = 1.0
+viscosity = 1/56000
+residualTol = 1e-06
+
+[CASEDATA]
+p_u0 = 1.0
+p_aoa = 0.0
+
+[TEMPERATURE]
+boundaryTypeMap = none
+solver = none
+
