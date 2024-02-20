@@ -232,10 +232,11 @@ void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
   const dfloat scale = 2.0; // CD = F/(.5 rho U^2 ) = 2*F
   auto o_Sij = platform->o_memPool.reserve<dfloat>(2 * nrs->NVfields * nrs->fieldOffset);
   postProcessing::strainRate(nrs, false, nrs->o_U, o_Sij); // "false" is correct
-  platform->linAlg->scaleMany(mesh->Nlocal, 6, nrs->fieldOffset, 2.0, o_Sij, 0); // Nek5k's Sij is 2x than nekrs one
+
 
   // dbg print
 /*
+  platform->linAlg->scaleMany(mesh->Nlocal, 6, nrs->fieldOffset, 2.0, o_Sij, 0); // Nek5k's Sij is 2x than nekrs one
   std::vector<dfloat> sij_min(6,99.0e20);
   std::vector<dfloat> sij_max(6,-99.0e20);
   for (int i=0;i<6;i++) {
@@ -259,6 +260,7 @@ void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
   if (platform->comm.mpiRank == 0) {
     printf("(rs)visc    %d %.8e %.8e %.8e\n",tstep,time,visc_min,visc_max);
   }   
+  platform->linAlg->scaleMany(mesh->Nlocal, 6, nrs->fieldOffset, 0.5, o_Sij, 0); // Nek5k's Sij is 2x than nekrs one
 */
 
   // vol flow rate is not implemented (p55)

@@ -57,7 +57,7 @@ s_sum_z[t] += s_sum_z[t + bs];                                                  
               const dfloat s23 = s32;
               const dfloat s33 = SIJ[idM + 2 * offset];
 
-              const dfloat scale = - mue[idM] * sWJ;
+              const dfloat scale = - 2.0 * mue[idM] * sWJ;
 
               const dfloat dragx = scale*(s11 * n1 + s12 * n2 + s13 * n3);
               const dfloat dragy = scale*(s21 * n1 + s22 * n2 + s23 * n3);
