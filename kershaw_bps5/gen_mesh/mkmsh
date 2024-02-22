@@ -1,0 +1,31 @@
+#!/bin/bash
+
+: ${GENBOX:=$HOME/Nek5000/bin/genbox}
+#genbox="/ccs/home/ylan/Nek5000_repo053023/bin/genbox"
+
+if [ $# -ne 1 ] || [ "$1" == "-h" ] || [ "$1" == "-help" ]; then
+  echo "usage: ${0##*/} nelx"
+  exit 1
+fi
+
+if [ -z $GENBOX ]; then
+  echo "genbox not found: "$GENBOX
+  exit 1
+fi
+
+
+set -x
+nelx=$1
+
+f="kershaw_nelx_"$nelx
+fbox=$f".box"
+fre2=$f".re2"
+
+
+cp kershaw.box $fbox
+sed -i '/nelx,nely,nelz/c\ -'$nelx' -'$nelx' -'$nelx'                   nelx,nely,nelz' $fbox
+
+$GENBOX << EOF
+$fbox
+EOF
+mv box.re2 $fre2

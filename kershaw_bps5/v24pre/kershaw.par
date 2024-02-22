@@ -1,0 +1,83 @@
+[OCCA]
+backend = serial
+
+[GENERAL] 
+#verbose = true
+polynomialOrder = 7
+dealiasing = false
+timeStepper = tombo1
+stopAt = numSteps
+numSteps = 0
+
+[PRESSURE]
+#solver = pfgmres+nVector=15
+#solver = pgmres #+nVector=20
+maxIterations = 200
+residualTol = 1e-8+relative
+#residualTol = 1e-20 #1e-8+relative
+
+# p-MG multiplicative V-cycle, coarse grid solve
+#preconditioner = multigrid
+#smootherType = RAS+FourthOptChebyshev #+maxEigenvalueBoundFactor=1.1
+#coarseSolver = boomerAMG+device #AmgX
+#coarseSolver = AmgX
+
+#coarseGridDiscretization = FEM #+Galerkin
+#pMGSchedule = p=7+degree=3, p=3+degree=3, p=1, p=3+degree=3, p=7+degree=3
+
+# p-MG additive V-cycle, overlapping coarse grid solve
+#preconditioner = multigrid+additive
+#coarseSolver = boomerAMG+cpu+overlap
+#smootherType = ASM
+
+# p-MG, solve coarsest level using SEMFEM discretization
+#preconditioner = multigrid
+#coarseGridDiscretization = SEMFEM
+
+# SEMFEM
+#preconditioner = semfem
+
+initialGuess = previous
+
+[VELOCITY]
+boundaryTypeMap = zeroGradient #zeroValue 
+preconditioner = none
+density = 1.0
+viscosity = 1.0
+
+#[BOOMERAMG]
+#coarsenType = 8 
+#interpolationType = 6
+#smootherType = 16
+#coarseSmootherType = 9 
+#iterations = 1
+#strongThreshold = 0.25
+#nonGalerkinTol = 0.0
+#aggressiveCoarseningLevels = 0
+#chebyshevRelaxOrder = 1
+
+#[AMGX]
+#configFile = "amgx.json"
+
+[CASEDATA]
+gsOverlap = 1
+
+# geom
+eps = 0.3
+
+# exact solution
+coef_n = 4
+coef_a = 0.5
+coef_b = 3.0 
+
+# Tests
+bp5 = false #true
+bp5Repetitions = 10
+bps5 = true
+bps5Repetitions = 20
+bp6 = false #true
+bp6Repetitions = 20
+
+# check results
+prtRes = true
+dumpSol = false #true
