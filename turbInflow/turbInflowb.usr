@@ -1,0 +1,188 @@
+c-----------------------------------------------------------------------
+      subroutine uservp (ix,iy,iz,eg)
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer e,f,eg
+c     e = gllel(eg)
+
+      udiff =0.
+      utrans=0.
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userf  (ix,iy,iz,eg)
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer e,f,eg
+c     e = gllel(eg)
+
+c     Note: this is an acceleration term, NOT a force!
+c     Thus, ffx will subsequently be multiplied by rho(x,t).
+
+      ffx = 0.0
+      ffy = 0.0
+      ffz = 0.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userq  (ix,iy,iz,eg)
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer e,f,eg
+c     e = gllel(eg)
+
+      qvol   = 0.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userbc (i,j,k,f,eg)
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer e,f,eg
+c      e = gllel(eg)
+c      ux=uin(i,j,k,e)
+c      uy=vin(i,j,k,e)
+c      uz=win(i,j,k,e)
+c
+c      temp=0.0
+c
+c      if (cbu.eq.'o  ') then
+c         U0 = 1.0                  ! characteristic velocity
+c         delta = 0.1               ! small positive constant
+c         pa = dongOutflow(i,j,k,e,f,U0,delta)
+c      endif
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine useric (ix,iy,iz,ieg)
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer idum
+      save    idum
+      data    idum  / 999 /
+
+      ux=0.01*(ran1(idum)-.5)
+      uy=0.01*(ran1(idum)-.5)
+      uz=0.05*(ran1(idum)-.5)
+
+c      if (x.le.-1.0) then
+         ux=(7./6.)*(1.0-z**6)
+         argy = 6*y
+         argx = 2*x
+         arg2 = sin(argx)
+         if (abs(z).lt.0.1) ux = ux + 0.3*sin(argy+arg2)
+c      endif
+
+      Under = 0.95
+
+      ux = Under * ux   ! Scale initial condition to match
+      uy = Under * uy   ! estimated bulk velocity.  Also,
+      uz = Under * uz   ! under-estimate mean velocity to avoid
+                                ! initial overshoot.
+      temp=0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat2
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+
+      character*3 cbc3
+      integer e,f
+
+      do e=1,nelv
+      do f=1,2*ldim
+        boundaryID(f,e) = 0
+        cbc3 = cbc(f,e,1)
+        if (cbc3.eq.'v  ') then
+          boundaryID(f,e) = 1
+        elseif (cbc3.eq.'O  '.OR.cbc3.eq.'o  ') then
+          cbc(f,e,1) = 'o  '
+          boundaryID(f,e) = 2 
+        elseif (cbc3.eq.'W  ') then
+          boundaryID(f,e) = 3
+        elseif (cbc3.eq.'SYM') then
+          boundaryID(f,e) = 4 
+        elseif (cbc3.eq.'E  '.OR.cbc3.eq.'   '.OR.
+     $          cbc3.eq.'P  '.OR.cbc3.eq.'p  ') then
+          ! do nothing
+        else
+          write(*,*)'invalid bc',lglel(e),f,cbc3
+          call exitt
+        endif
+      enddo      
+      enddo      
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat3
+      include 'SIZE'
+      include 'TOTAL'
+c
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userchk
+      include 'SIZE'
+      include 'TOTAL'
+
+      integer e
+
+      n=nx1*ny1*nz1*nelv
+
+c     Compute perturbation energy
+      ub = glsc2(vx,bm1,n)/volvm1
+      e2 = glsc3(vy,bm1,vy,n)+glsc3(vz,bm1,vz,n)
+      e2 = e2/volvm1
+      um = glamax(vx,n)
+
+      if(nio.eq.0) write(6,1) istep,time,e2,ub,um
+    1              format(i6,1p4e13.5,' e2(5k)')
+
+      return
+      end
+c-----------------------------------------------------------------------
+      function dongOutflow(ix,iy,iz,iel,iside,u0,delta)
+
+      include 'SIZE'
+      include 'SOLN'
+      include 'GEOM'
+
+      real sn(3)
+
+      ux = vx(ix,iy,iz,iel)
+      uy = vy(ix,iy,iz,iel)
+      uz = vz(ix,iy,iz,iel)
+
+      call getSnormal(sn,ix,iy,iz,iside,iel)
+      vn = ux*sn(1) + uy*sn(2) + uz*sn(3)
+      S0 = 0.5*(1.0 - tanh(vn/u0/delta))
+
+      dongOutflow = -0.5*(ux*ux+uy*uy+uz*uz)*S0
+
+      return
+      end
+C-----------------------------------------------------------------------

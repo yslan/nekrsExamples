@@ -1,0 +1,27 @@
+[GENERAL]
+#verbose = true
+polynomialOrder = 7
+cubaturePolynomialOrder = 11
+startFrom = "r1.fld"
+stopAt = numSteps
+numSteps = 100
+
+dt = 5.0e-3
+
+timeStepper = tombo3
+
+writeControl = steps
+writeInterval = 10
+
+regularization = hpfrt + nModes=2 + scalingCoeff=50
+
+[PRESSURE]
+residualTol = 1.e-8 #1.e-6
+initialGuess = projectionAconj+nVector=20
+
+[VELOCITY]
+boundaryTypeMap = inlet, outlet, wall, sym
+density = 1.0
+viscosity = -10000.0
+residualTol = 1.e-10 #1.e-7
+

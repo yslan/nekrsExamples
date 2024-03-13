@@ -1,0 +1,263 @@
+//
+// nekRS User Defined File
+//
+#include <numeric>
+#include "udf.hpp"
+//#include "plugins/velRecycling.hpp"
+
+static pointInterpolation_t *interpolator = nullptr;
+static occa::memory o_BdryToV;
+static occa::memory o_Upart;
+
+static occa::kernel getBCFluxKernel;
+static occa::kernel sumReductionKernel;
+
+static int bidInlet;
+static dfloat targetUbar;
+
+static dfloat *flux, *area;
+static occa::memory o_flux, o_area;
+
+static dfloat *tmp1, *tmp2;
+static occa::memory o_tmp1, o_tmp2;
+
+static int Nblock;
+
+#ifdef __okl__
+
+// user kernel
+@kernel void copyBoundaryPoints(const dlong Npart,
+                                @ restrict const dlong *BdryToV,
+                                @ restrict const dfloat *X,
+                                @ restrict const dfloat *Y,
+                                @ restrict const dfloat *Z,
+                                @ restrict dfloat *Xpart,
+                                @ restrict dfloat *Ypart,
+                                @ restrict dfloat *Zpart)
+{
+  for (dlong n = 0; n < Npart; ++n; @tile(256, @outer, @inner)) {
+    if (n < Npart) {
+      const dlong v = BdryToV[n];
+      Xpart[n] = X[v];
+      Ypart[n] = Y[v];
+      Zpart[n] = Z[v];
+    }
+  } 
+}
+
+@kernel void pasteInletVelocity(const dlong Npart,
+                                const dlong fieldOffset,
+                                @ restrict const dlong *BdryToV,
+                                @ restrict const dfloat *Upart,
+                                @ restrict dfloat *U)
+{ 
+  for (dlong n = 0; n < Npart; ++n; @tile(256, @outer, @inner)) {
+    if (n < Npart) {
+      const dlong v = BdryToV[n];
+      U[0*fieldOffset + v] = Upart[0*Npart + n];
+      U[1*fieldOffset + v] = Upart[1*Npart + n];
+      U[2*fieldOffset + v] = Upart[2*Npart + n];
+    }   
+  } 
+}
+
+@kernel void scaleInletVelocity(const dlong Npart,
+                                const dlong fieldOffset,
+                                const dfloat scale,
+                                @ restrict const dlong *BdryToV,
+                                @ restrict dfloat *U)
+{ 
+  for (dlong n = 0; n < Npart; ++n; @tile(256, @outer, @inner)) {
+    if (n < Npart) {
+      const dlong v = BdryToV[n];
+      U[0*fieldOffset + v] *= scale;
+      U[1*fieldOffset + v] *= scale;
+      U[2*fieldOffset + v] *= scale;
+    } 
+  }
+}
+
+
+
+void velocityDirichletConditions(bcData *bc)
+{
+  bc->u = bc->usrwrk[bc->idM + 0 * bc->fieldOffset];
+  bc->v = bc->usrwrk[bc->idM + 1 * bc->fieldOffset];
+  bc->w = bc->usrwrk[bc->idM + 2 * bc->fieldOffset];
+}
+
+// Stabilized outflow (Dong et al)
+void pressureDirichletConditions(bcData *bc)
+{
+  const dfloat iU0delta = 10.0;
+  const dfloat un = bc->u * bc->nx + bc->v * bc->ny + bc->w * bc->nz;
+  const dfloat s0 = 0.5 * (1.0 - tanh(un * iU0delta));
+  bc->p = -0.5 * (bc->u * bc->u + bc->v * bc->v + bc->w * bc->w) * s0;
+}
+
+#endif
+
+void setupRecycledInflow(nrs_t *nrs, int bID, dfloat dx, dfloat dy, dfloat dz, dfloat ubar)
+{
+  mesh_t *mesh = nrs->meshV; 
+
+  bidInlet = bID;
+  targetUbar = ubar;
+
+  // count faces
+  dlong nface = 0;
+  for (dlong e = 0; e<mesh->Nelements; e++)
+    for (int f = 0; f < mesh->Nfaces; f++)
+      if (mesh->EToB[f + mesh->Nfaces * e] == bidInlet) nface++;
+
+  const dlong npts = nface * mesh->Nfp;
+
+  dlong nfaceg = nface;
+  MPI_Allreduce(MPI_IN_PLACE, &nfaceg, 1, MPI_DLONG, MPI_SUM, platform->comm.mpiComm);
+  if (platform->comm.mpiRank==0) 
+    printf("setupRecycledInflow, bid = %d, nface = %d, npts = %d\n", bidInlet, nfaceg, nfaceg*mesh->Nfp);
+
+  // allocate
+  occa::memory o_xpart = platform->device.malloc(npts, sizeof(dfloat));
+  occa::memory o_ypart = platform->device.malloc(npts, sizeof(dfloat));
+  occa::memory o_zpart = platform->device.malloc(npts, sizeof(dfloat));
+  o_BdryToV = platform->device.malloc(npts, sizeof(dlong));
+  o_Upart = platform->device.malloc(nrs->NVfields * npts, sizeof(dfloat));
+
+  const dlong NfpTotal = mesh->Nelements * mesh->Nfaces * mesh->Nfp;
+
+  Nblock = (NfpTotal + BLOCKSIZE - 1) / BLOCKSIZE;
+  tmp1 = (dfloat *)calloc(Nblock, sizeof(dfloat));
+  tmp2 = (dfloat *)calloc(Nblock, sizeof(dfloat));
+  o_tmp1 = platform->device.malloc(Nblock * sizeof(dfloat), tmp1);
+  o_tmp2 = platform->device.malloc(Nblock * sizeof(dfloat), tmp2);
+                         
+  flux = (dfloat *)calloc(NfpTotal, sizeof(dfloat));
+  area = (dfloat *)calloc(NfpTotal, sizeof(dfloat));
+  o_flux = platform->device.malloc(NfpTotal * sizeof(dfloat), flux);
+  o_area = platform->device.malloc(NfpTotal * sizeof(dfloat), area);
+
+  // set up id mapping
+  {
+    std::vector<dlong> BdryToV;
+    BdryToV.reserve(npts);
+    dlong ia = 0;
+    for (dlong e = 0; e<mesh->Nelements; e++) {
+      for (int f = 0; f < mesh->Nfaces; f++) {  
+        if (mesh->EToB[f + mesh->Nfaces * e] == bidInlet) {
+          dlong offset = e * mesh->Nfaces * mesh->Nfp + f * mesh->Nfp;
+          for (int v = 0; v < mesh->Nfp; v++) {
+            BdryToV[ia] = mesh->vmapM[offset + v];
+            ia++;
+          }
+        }
+      }
+    }
+    o_BdryToV.copyFrom(BdryToV.data(), npts * sizeof(dlong));
+  }
+
+  // extract inlet locations
+  copyBoundaryPoints(npts, o_BdryToV, mesh->o_x, mesh->o_y, mesh->o_z,
+                     o_xpart, o_ypart, o_zpart); 
+
+  // recycled location
+  platform->linAlg->add(npts, dx, o_xpart);
+  platform->linAlg->add(npts, dy, o_ypart);
+  platform->linAlg->add(npts, dz, o_zpart);
+
+  interpolator = new pointInterpolation_t(nrs);
+  interpolator->setPoints(npts, o_xpart, o_ypart, o_zpart);
+  interpolator->find();
+}
+
+void updateRecycledVelocity(nrs_t *nrs)
+{
+  mesh_t *mesh = nrs->meshV;
+
+  dlong npts = interpolator->numPoints();
+  interpolator->eval(nrs->NVfields, nrs->fieldOffset, nrs->o_U, npts, o_Upart);
+  pasteInletVelocity(npts, nrs->fieldOffset, o_BdryToV, o_Upart, nrs->o_usrwrk);
+
+  // rescale
+  const dlong NfpTotal = mesh->Nelements * mesh->Nfaces * mesh->Nfp;
+
+  getBCFluxKernel(mesh->Nelements,
+                  bidInlet,
+                  nrs->fieldOffset,
+                  nrs->o_usrwrk,
+                  mesh->o_vmapM,
+                  mesh->o_EToB,
+                  mesh->o_sgeo,
+                  o_area,
+                  o_flux);
+
+  sumReductionKernel(NfpTotal, o_area, o_flux, o_tmp1, o_tmp2);
+
+  o_tmp1.copyTo(tmp1);
+  o_tmp2.copyTo(tmp2);
+  dfloat sbuf[2] = {0, 0};
+  for (int n = 0; n < Nblock; n++) {
+    sbuf[0] += tmp1[n];
+    sbuf[1] += tmp2[n];
+  }
+  MPI_Allreduce(MPI_IN_PLACE, sbuf, 2, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+
+  const dfloat scale = -targetUbar * sbuf[0] / sbuf[1];
+  scaleInletVelocity(npts, nrs->fieldOffset, scale, o_BdryToV, nrs->o_usrwrk);
+  
+}
+
+void UDF_LoadKernels(occa::properties &kernelInfo)
+{
+  const std::string path = getenv("NEKRS_KERNEL_DIR") + std::string("/plugins/");
+  
+  std::string fileName, kernelName;
+  const std::string extension = ".okl";
+  { 
+    kernelName = "getBCFlux";
+    fileName = path + kernelName + extension;
+    getBCFluxKernel = platform->device.buildKernel(fileName, kernelInfo, true);
+    
+    kernelName = "sumReduction"; 
+    fileName = path + kernelName + extension;
+    sumReductionKernel = platform->device.buildKernel(fileName, kernelInfo, true);
+  }
+}
+
+void UDF_Setup(nrs_t *nrs)
+{
+  nrs->o_usrwrk = platform->device.malloc(nrs->NVfields * nrs->fieldOffset, sizeof(dfloat));
+
+  int bID = 1; // inlet's boundary id
+  const dfloat dx = 5.0;
+  const dfloat dy = 0.0;
+  const dfloat dz = 0.0;
+  const dfloat ubar = 1.0;
+  setupRecycledInflow(nrs, bID, dx, dy, dz, ubar);
+}
+
+void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
+{
+  updateRecycledVelocity(nrs);
+
+  // chk: Compute perturbation energy
+  occa::memory o_UX = nrs->o_U + 0 * nrs->fieldOffset * sizeof(dfloat);
+  occa::memory o_UY = nrs->o_U + 1 * nrs->fieldOffset * sizeof(dfloat);
+  occa::memory o_UZ = nrs->o_U + 2 * nrs->fieldOffset * sizeof(dfloat);
+
+  mesh_t *mesh = nrs->meshV;
+  const dfloat ub = platform->linAlg->innerProd(mesh->Nlocal, o_UX, mesh->o_LMM, platform->comm.mpiComm) / mesh->volume;
+  const dfloat e2y = platform->linAlg->weightedNorm2(mesh->Nlocal, mesh->o_LMM, o_UY, platform->comm.mpiComm);
+  const dfloat e2z = platform->linAlg->weightedNorm2(mesh->Nlocal, mesh->o_LMM, o_UZ, platform->comm.mpiComm);
+  const dfloat e2 = (e2y*e2y + e2z*e2z) / mesh->volume;
+  const dfloat um = platform->linAlg->amax(mesh->Nlocal, o_UX, platform->comm.mpiComm);
+
+  if (platform->comm.mpiRank==0)
+    printf("%6d %13.5e %13.5e %13.5e %13.5e e2(rs)\n",tstep,time,e2,ub,um);
+
+  // chk: Nek5000
+  if (nrs->isOutputStep) {
+    nek::ocopyToNek(time, tstep);
+    nek::userchk(); 
+  }
+}

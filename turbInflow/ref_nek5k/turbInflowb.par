@@ -1,0 +1,23 @@
+#
+# nek parameter file
+#
+[GENERAL] 
+startFrom = "r1.fld"
+timeStepper = bdf3 #bdf2
+dt = 5e-03
+numSteps = 100
+writeInterval = 10
+
+filtering = hpfrt
+filterModes = 2 
+filterWeight = 50
+
+[PRESSURE]
+residualTol = 1.e-8
+residualProj = yes
+
+[VELOCITY]
+density = 1
+viscosity = -10000.0
+residualTol = 1.e-10
+residualProj = no
