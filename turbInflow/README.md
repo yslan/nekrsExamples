@@ -36,7 +36,7 @@ Load restart file `r1.fld`, run visc = 1e-4 with Dong's outflow.
 
   NekRS:
   ```
- istep  time         e2           ub           um
+  istep  time         e2           ub           um
     91   5.04550e+01   7.79236e-03   1.00001e+00   1.49612e+00 e2(rs)
     92   5.04600e+01   7.79283e-03   1.00001e+00   1.49685e+00 e2(rs)
     93   5.04650e+01   7.79330e-03   1.00001e+00   1.49692e+00 e2(rs)
@@ -51,7 +51,7 @@ Load restart file `r1.fld`, run visc = 1e-4 with Dong's outflow.
 
   Nek5000
   ```
- istep  time         e2           ub           um
+  istep time         e2           ub           um
     91  5.04550E+01  7.79192E-03  1.00001E+00  1.49612E+00 e2
     92  5.04600E+01  7.79240E-03  1.00001E+00  1.49685E+00 e2
     93  5.04650E+01  7.79287E-03  1.00001E+00  1.49692E+00 e2
