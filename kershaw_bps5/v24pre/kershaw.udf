@@ -158,6 +158,7 @@ void runBenchmarks(nrs_t *nrs)
     std::vector<double> precoTime;
     std::vector<double> smootherTime;
     std::vector<double> crsTime;
+    std::vector<int> Niters;
 
     for (int i = 0; i < Nrep; i++) {
       platform->linAlg->fill(nrs->NVfields * nrs->fieldOffset, 0.0, nrs->o_U);
@@ -187,6 +188,7 @@ void runBenchmarks(nrs_t *nrs)
         }
       }
       crsTime.push_back(platform->timer.query("coarseSolve", "DEVICE:MAX"));
+      Niters.push_back(solver->Niter());
     }
     if (platform->comm.mpiRank == 0) {
       printf("\n");
@@ -196,6 +198,11 @@ void runBenchmarks(nrs_t *nrs)
     MPI_Allreduce(MPI_IN_PLACE, &Ntotal, 1, MPI_HLONG, MPI_SUM, platform->comm.mpiComm);
 
     const auto minEntry = std::distance(eTime.begin(), std::min_element(eTime.begin(), eTime.end()));
+    const int iter = Niters.at(minEntry);
+    const int iterMin = *std::min_element(Niters.begin(), Niters.end());
+    const int iterMax = *std::max_element(Niters.begin(), Niters.end());
+    const double iterAvg = ((double) std::accumulate(Niters.begin(), Niters.end(), 0)) / Nrep;
+
     const double solveTime = eTime.at(minEntry);
     const double solveTimeMax = *std::max_element(eTime.begin(), eTime.end());
     const double solveTimeAvg = std::accumulate(eTime.begin(), eTime.end(), 0.0) / Nrep;
@@ -222,8 +229,8 @@ void runBenchmarks(nrs_t *nrs)
         }
       }
 
-      printf("iterations: %d\n", solver->Niter());
-      printf("throughput: %g (DOF x iter)/s/rank\n", (double)solver->Niter() * throughput);
+      printf("iterations: %d (min: %d  max: %d  avg: %g)\n", iter,iterMin,iterMax,iterAvg);
+      printf("throughput: %g (DOF x iter)/s/rank\n", (double)iter * throughput);
       if (benchmark == "BPS5") {
         printf("throughput: %g DOF/s/rank\n", throughput);
       }
