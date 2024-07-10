@@ -13,3 +13,6 @@ Here we focus on porting Nek5000 functionality into NekRS
 
 - `kershaw_bps5`        
   CEED's bps5
+
+- robin     
+  Robin BC, or Newton cooling BC in Nek5000

@@ -1,0 +1,26 @@
+// Boundary conditions
+void velocityDirichletConditions(bcData *bc)
+{
+  bc->u = 1.0;
+  bc->v = 0.0;
+  bc->w = 0.0;
+}
+
+// Nek5000's Newton cooling: - h1 * dudn = - hc * (T - Tinf) = - hc * T + hc * Tinf;
+// rhs += Tinf * hc (area)
+void scalarNeumannConditions(bcData *bc)
+{     
+  if (bc->scalarId==0) {
+    bc->flux = p_TINF * p_HC; 
+  } 
+}
+
+void scalarDirichletConditions(bcData *bc)
+{
+  if (bc->scalarId==0) {
+
+    bc->s = 0.0;
+
+  }
+}
+

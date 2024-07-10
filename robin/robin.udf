@@ -1,0 +1,105 @@
+//
+// nekRS User Defined File
+//
+#include <math.h>
+#include "udf.hpp"
+
+static dfloat P_HC, P_TINF;
+static dfloat P_s0conductivity;
+static int updateScalarImplicitTerm = 1;
+occa::memory o_bidRobin, o_robinLHS;
+
+#ifdef __okl__
+
+#include "robin.oudf"
+
+#endif
+
+void UDF_LoadKernels(deviceKernelProperties& kernelInfo)
+{   
+  kernelInfo.define("p_HC") = P_HC;
+  kernelInfo.define("p_TINF") = P_TINF;
+} 
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+
+  platform->par->extract("casedata", "p_hc", P_HC);
+  platform->par->extract("casedata", "p_tinf", P_TINF);
+
+  platform->options.getArgs("SCALAR00 DIFFUSIVITY", P_s0conductivity);
+
+  if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+    *nek::ptr<double>("p_hc") = P_HC;
+    *nek::ptr<double>("p_s0conductivity") = P_s0conductivity;
+  }
+}
+
+// Nek5000's Newton cooling: -h1 * dudn = -hc * (T - Tinf) = - hc * T + hc * Tinf;
+// helm(h1,h2): h2 += hc * area / mass
+occa::memory userScalarImplicitTerm(double time, int scalarId)
+{
+  auto cds = nrs->cds;
+  auto mesh = (scalarId) ? cds->meshV : cds->mesh[0];
+  if (updateScalarImplicitTerm) {
+    if (platform->comm.mpiRank == 0) {
+      std::cout << "updating userImplicitTerm"
+                << " sid=" << scalarId
+                << " hc=" << P_HC
+                << " nbid=" << o_bidRobin.length()
+                << " Nlocal=" << mesh->Nlocal
+                << "\n";
+    }
+
+    // invLMM is 1/dssum(LMM), we want 1/LMM
+    o_robinLHS.copyFrom(mesh->o_LMM, mesh->Nlocal);
+    platform->linAlg->ady(mesh->Nlocal, 1.0, o_robinLHS);
+
+    // compute area / bm1
+    auto o_surfaceAreaRate = mesh->surfaceAreaMultiply(o_bidRobin.length(), o_bidRobin, o_robinLHS);
+
+    platform->linAlg->fill(mesh->Nlocal, P_HC, o_robinLHS);
+    platform->linAlg->axmy(mesh->Nlocal, 1.0, o_surfaceAreaRate, o_robinLHS); // y[n] = a*x[n]*y[n]
+    updateScalarImplicitTerm = 0;
+  }
+  if (scalarId==0) {
+    return o_robinLHS;
+  }
+  return o_NULL;
+}
+
+void UDF_Setup()
+{
+  // set up Robin BC id
+  std::vector<int> bID = {2};
+  o_bidRobin = platform->device.malloc<int>(bID.size(), bID.data());
+
+  // allocate LHS of Robin
+  o_robinLHS = platform->device.malloc<dfloat>(nrs->fieldOffset);
+
+  // add robin LHS to implicit linear term
+  nrs->userScalarImplicitLinearTerm = &userScalarImplicitTerm;
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+  cds_t *cds = nrs->cds;
+
+  // chk TEMP min/max average
+  mesh_t *mesh = cds->mesh[0];
+  const dfloat tbar = 
+      platform->linAlg->innerProd(mesh->Nlocal, cds->o_S, mesh->o_LMM, platform->comm.mpiComm) / mesh->volume;
+  const double P_s0lamb = *nek::ptr<double>("p_s0lamb");
+  const dfloat tbar_lamb = exp(-P_s0lamb*P_s0conductivity*time);
+  const dfloat ratio = tbar_lamb / tbar;
+  if (platform->comm.mpiRank == 0) {
+    printf(" tbar: %4d %12.4e %12.4e lamb %12.4e %12.4e %12.4e\n", tstep, time, tbar, P_s0lamb, tbar_lamb, ratio);
+  }
+/*
+  if (nrs->isOutputStep) {
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+*/
+}
