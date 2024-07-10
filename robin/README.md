@@ -1,21 +1,20 @@
 # Example of Robin BC
 
-- version: v24 (repo/next 07/10/24 + some fixes that will be released later)
+This example show how to solve scalars with Robin type BC, to be more specific, the Newton cooling BC `"c  "` in Nek5000.
 
-This example show how to solve scalars with Robin type BC.
-To be more specific, the Newton cooling BC `c  ` in Nek5000.
+- version: v24 (repo/next 07/10/24 + some fixes that will be released later)
 
 ### Implementation
 
-Use Neumann BC `f  `, tag boundary ID for Robin in `UDF_Setup`. 
+Use Neumann BC `"f  "`, tag boundary ID for Robin in `UDF_Setup`. 
 The RHS (derivative part) can be computed in `.oudf` and the LHS will be added into `h2` via the implicit linear term
 
-- Newton cooling
-  $$ - \kappa \nabla T \cdot {\vec n} = h_c (T - T_{\infty}) $$
+- Newton cooling   
+  $$- \kappa \nabla T \cdot {\vec n} = h_c (T - T_{\infty})$$
 
 - Robin
-  $$ \alpha \nabla T \cdot {\vec n} + \beta T = \gamma $$      
-  Therefore, $\gamma = h_c T_{\infty}, \beta = h_c, \alpha=\kappa$
+  $$\alpha \nabla T \cdot {\vec n} + \beta T = \gamma$$      
+  Therefore, $\gamma = h_c T_{\infty}$, $\beta = h_c$, $\alpha=\kappa$
 
 
 ### Verification
