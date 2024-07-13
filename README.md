@@ -16,3 +16,6 @@ Here we focus on porting Nek5000 functionality into NekRS
 
 - robin     
   Robin BC, or Newton cooling BC in Nek5000
+
+- hmhSolver   
+  solve extra Helmholtz solvers in `UDF_ExecuteStep`

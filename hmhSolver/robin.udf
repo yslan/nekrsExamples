@@ -1,0 +1,241 @@
+//
+// nekRS User Defined File
+//
+#include <math.h>
+#include "udf.hpp"
+
+#include "hmh_solver.hpp"
+
+static dfloat P_COEF, P_X0, P_Y0, P_HC, P_TINF;
+static dfloat P_s0conductivity, P_s0lamb;
+
+static dfloat hmh_h1, hmh_h2;
+
+std::vector< std::vector<int> > bidRobin;
+std::vector<bool> updateScalarImplicitTerm;
+
+// work arrays
+deviceMemory<int> o_bidtmp;
+occa::memory o_robinSavedLHS;
+
+#ifdef __okl__
+
+#include "robin.oudf"
+
+#endif
+
+// test hmh solver with Robin BC
+// Solving Helmholtz equations
+//   - div h1 grad T + h2 T = q
+void test_hmh_solver(nrs_t *nrs, const dfloat timeNew, const int tstep, const int caseId, const int is)
+{
+// Test case: - 1/pi^2 \nabla^2 u + a^2 u = 0
+// u_exact = sin(a*pi*x + x0) + cos(a*pi*y + y0)
+// Robin BC: h1 * dudn (inward normal) = hc * (T - Tinf);
+// Input: a, x0, y0, hc
+
+  cds_t *cds = nrs->cds;
+  auto mesh = (is) ? cds->meshV : cds->mesh[0];
+  const auto Nlocal = mesh->Nlocal;
+  updateScalarImplicitTerm.at(is) = true;
+
+  // set h1, h2, rhs
+  const dfloat h2tmp = (caseId==0) ? 0.0 : hmh_h2;
+
+  occa::memory o_h1 = platform->o_memPool.reserve<dfloat>(Nlocal);
+  occa::memory o_h2 = platform->o_memPool.reserve<dfloat>(Nlocal);
+  occa::memory o_rhs = platform->o_memPool.reserve<dfloat>(Nlocal);
+
+  platform->linAlg->fill(Nlocal, hmh_h1, o_h1);
+  platform->linAlg->fill(Nlocal, h2tmp, o_h2);
+  exactTrhs(caseId, Nlocal, nrs->fieldOffset, mesh->o_x, mesh->o_y, mesh->o_z, o_h1, o_h2, o_rhs);
+
+  // set initial guess
+  occa::memory o_Si = cds->o_S + cds->fieldOffsetScan[is];
+  platform->linAlg->fill(Nlocal, 0.0, o_Si);
+
+  // solve
+  hmhSolver::solve(nrs, is, timeNew, tstep, o_h1, o_h2, o_rhs);
+
+  // check results
+  occa::memory o_Texact = platform->o_memPool.reserve<dfloat>(Nlocal);
+  exactT(caseId, Nlocal, nrs->fieldOffset, mesh->o_x, mesh->o_y, mesh->o_z, o_Texact);
+  const dfloat norm1 = platform->linAlg->amax(Nlocal, o_Texact, platform->comm.mpiComm);
+  const dfloat norm2 = platform->linAlg->weightedNorm2(Nlocal, mesh->o_LMM, o_Texact, platform->comm.mpiComm);
+
+  platform->linAlg->axpby(Nlocal, 1.0, o_Si, -1.0, o_Texact); // y = ax+by
+  const dfloat err1 = platform->linAlg->amax(Nlocal, o_Texact, platform->comm.mpiComm) / norm1;
+  const dfloat err2 = platform->linAlg->weightedNorm2(Nlocal, mesh->o_LMM, o_Texact, platform->comm.mpiComm) / norm2; 
+
+  if (platform->comm.mpiRank==0) {
+    const char tags[2][5] = {"poi ","hmh "};
+    elliptic *solver = cds->solver[is];
+
+    setupAide& ellipticOptions = cds->solver[is]->options();
+    std::string solverName;
+    ellipticOptions.getArgs("SOLVER", solverName);
+
+    const int iter = solver->Niter();
+    const dfloat res0 = solver->initialGuessResidual();
+    const dfloat res1 = solver->finalResidual();
+    printf("\nhmh_test %s step=%d time=%g scalarId=%d (h1,h2)=(%g,%g)",
+           tags[caseId],tstep,timeNew,is,hmh_h1,h2tmp);
+    printf(" %s iter=%d err(abs,rel)=(%g,%g)",solverName.c_str(),iter,err1,err2);
+    printf(" res=(%.2e,%.2e)",res0,res1);
+
+    const auto [prevProjVecs, nProjVecs] = solver->projectionCounters();
+    if (nProjVecs > 0) {
+      if (prevProjVecs > 0) {
+        const dfloat res00 = solver->initialResidual();
+        const dfloat ratio = solver->initialResidual() / solver->initialGuessResidual();
+        printf(" pj=(%.2e,%.2e,%.3e) %d/%d",res00,res0,ratio,prevProjVecs,nProjVecs);
+      }
+    } 
+    printf("\n");
+  }
+}
+
+void UDF_LoadKernels(deviceKernelProperties& kernelInfo)
+{   
+  kernelInfo.define("p_HC") = P_HC;
+  kernelInfo.define("p_TINF") = P_TINF;
+  kernelInfo.define("p_COEF") = P_COEF;
+  kernelInfo.define("p_X0") = P_X0;
+  kernelInfo.define("p_Y0") = P_Y0;
+  kernelInfo.define("p_pi") = M_PI;
+} 
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  platform->par->extract("casedata", "p_hc", P_HC);
+  platform->par->extract("casedata", "p_tinf", P_TINF);
+  platform->par->extract("casedata", "p_coef", P_COEF);
+  platform->par->extract("casedata", "p_x0", P_X0);
+  platform->par->extract("casedata", "p_y0", P_Y0);
+
+  hmh_h1 = 1.0/M_PI/M_PI;
+  hmh_h2 = -P_COEF*P_COEF;
+
+  platform->options.getArgs("SCALAR00 DIFFUSIVITY", P_s0conductivity);
+
+  if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+    *nek::ptr<double>("p_hc") = P_HC;
+    *nek::ptr<double>("p_s0conductivity") = P_s0conductivity;
+  }
+}
+
+// Nek5000's Newton cooling: -h1 * dudn = -hc * (T - Tinf) = - hc * T + hc * Tinf;
+// helm(h1,h2): h2 += hc * area / mass
+occa::memory userScalarImplicitTerm(double time, int scalarId)
+{ 
+  auto cds = nrs->cds;
+  auto mesh = (scalarId) ? cds->meshV : cds->mesh[0];
+  auto o_robinLHS = o_robinSavedLHS.slice(scalarId * nrs->fieldOffset, nrs->fieldOffset);
+
+  auto bid = bidRobin.at(scalarId);
+  int isEmpty = (bid.size()==0) ? 1 : 0;
+
+  if (updateScalarImplicitTerm.at(scalarId)) {
+    if (platform->comm.mpiRank == 0) {
+      std::cout << "updating userImplicitTerm"
+                << ", time=" << time
+                << ", sid=" << scalarId
+                << ", bid=";
+      if (isEmpty) {
+        std::cout << "none";
+      } else {
+        for (auto i: bid) {
+          std::cout << i << " ";
+        }
+      }
+      std::cout << ", hc=" << P_HC
+                << ", tinf=" << P_TINF
+                << "\n";
+    }
+  
+    if (!isEmpty) {
+      o_bidtmp.resize(bid.size());
+      o_bidtmp.copyFrom(bid.data(),bid.size());
+
+      // invLMM is 1/dssum(LMM), we want 1/LMM
+      o_robinLHS.copyFrom(mesh->o_LMM, mesh->Nlocal);
+      platform->linAlg->ady(mesh->Nlocal, 1.0, o_robinLHS);
+      
+      // compute area / bm1
+      auto o_surfaceAreaRate = mesh->surfaceAreaMultiply(o_bidtmp.length(), o_bidtmp, o_robinLHS);
+      
+      platform->linAlg->fill(mesh->Nlocal, P_HC, o_robinLHS);
+      platform->linAlg->axmy(mesh->Nlocal, 1.0, o_surfaceAreaRate, o_robinLHS); // y[n] = a*x[n]*y[n]
+    }
+    updateScalarImplicitTerm.at(scalarId) = false;
+  }
+
+  if (isEmpty) {
+    return o_NULL;
+  } else {
+    return o_robinLHS;
+  }
+}
+
+void UDF_Setup()
+{
+  // set up Robin BC id
+  bidRobin.resize(nrs->Nscalar);
+  bidRobin.at(0).assign({2}); // S00
+  bidRobin.at(1).assign({});  // S01
+  bidRobin.at(2).assign({});  // S02
+  bidRobin.at(3).assign({2}); // S03
+
+  // allocate LHS of Robin
+  o_robinSavedLHS = platform->device.malloc<dfloat>(nrs->Nscalar * nrs->fieldOffset);
+
+  // add robin LHS to implicit linear term
+  updateScalarImplicitTerm.resize(nrs->Nscalar,true);
+  nrs->userScalarImplicitLinearTerm = &userScalarImplicitTerm;
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+  cds_t *cds = nrs->cds;
+  if (tstep == 0) {
+    hmhSolver::setup(nrs, 1);
+    hmhSolver::setup(nrs, 2);
+    hmhSolver::setup(nrs, 3);
+
+    // don't update scalars in nekrs
+    for(int is=1; is<nrs->Nscalar; is++){
+      cds->compute[is] = 0;
+    }
+  }
+
+  // Run 2 tests, 3 BC each
+  if (tstep==1) {
+    const int caseId = 0;
+    test_hmh_solver(nrs, time, tstep, caseId, 1);
+    test_hmh_solver(nrs, time, tstep, caseId, 2);
+    test_hmh_solver(nrs, time, tstep, caseId, 3);
+  } else if (tstep==11) {
+    const int caseId = 1;
+    test_hmh_solver(nrs, time, tstep, caseId, 1);
+    test_hmh_solver(nrs, time, tstep, caseId, 2);
+    test_hmh_solver(nrs, time, tstep, caseId, 3);
+  }
+
+  // chk TEMP min/max average
+  mesh_t *mesh = cds->mesh[0];
+  const dfloat tbar =
+      platform->linAlg->innerProd(mesh->Nlocal, cds->o_S, mesh->o_LMM, platform->comm.mpiComm) / mesh->volume;
+  const double P_s0lamb = *nek::ptr<double>("p_s0lamb");
+  const dfloat tbar_lamb = exp(-P_s0lamb*P_s0conductivity*time);
+  const dfloat ratio = tbar_lamb / tbar;
+  if (platform->comm.mpiRank == 0) {
+    printf(" tbar: %4d %12.4e %12.4e lamb %12.4e %12.4e %12.4e\n", tstep, time, tbar, P_s0lamb, tbar_lamb, ratio);
+  }
+/*
+  if (nrs->isOutputStep) {
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+*/
+}
