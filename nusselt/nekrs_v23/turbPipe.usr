@@ -1,0 +1,219 @@
+c-----------------------------------------------------------------------
+      subroutine userchk
+      include 'SIZE'
+      include 'TOTAL'
+      real nu
+      call compute_nusselt(nu)
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine useric (ix,iy,iz,ieg)
+
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      real zlength, nslabs, nelslab
+      common /casevars/ zlength, nslabs, nelslab
+
+      xr = x/0.5
+      yr = y/0.5
+      rr = xr*xr + yr*yr
+      if (rr.gt.0) rr=sqrt(rr)
+      th = atan2(y,x)
+      zo = 2*pi*z/ZLENGTH
+
+      uz = 6.*(1-rr**6)/5.
+
+c     Assign a wiggly shear layer near the wall
+      amp_z    = 0.35  ! Fraction of 2pi for z-based phase modification
+      freq_z   = 4     ! Number of wiggles in axial- (z-) direction
+      freq_t   = 9     ! Frequency of wiggles in azimuthal-direction
+
+      amp_tht  = 5     ! Amplification factor for clipped sine function
+      amp_clip = 0.2   ! Clipped amplitude
+
+      blt      = 0.07  ! Fraction of boundary layer with momentum deficit
+
+      phase_z = amp_z*(2*pi)*sin(freq_z*zo)
+
+      arg_tht = freq_t*th + phase_z
+      amp_sin = 5*sin(arg_tht)
+      if (amp_sin.gt. amp_clip) amp_sin =  amp_clip
+      if (amp_sin.lt.-amp_clip) amp_sin = -amp_clip
+
+      if (rr.gt.(1-blt)) uz = uz + amp_sin
+
+c     Quick P-independent randomizer
+      big  = 1.e3*ieg + 1.e2*ix + 1.e1*iy + 1.e0*iz
+      rand = sin(big)
+
+      ux   = .05*rand*rand
+      uy   = .10*rand*rand*rand
+      uz   = uz + .01*rand
+
+      temp = 0.
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat2
+
+      include 'SIZE'
+      include 'TOTAL'
+
+      COMMON /SCNRS/ sc_nrs(10)
+      real           sc_nrs
+
+      real zlength, nslabs, nelslab
+      common /casevars/ zlength, nslabs, nelslab
+
+      ZLENGTH = sc_nrs(1)
+      NSLABS = sc_nrs(2)
+      NELSLAB = sc_nrs(3)
+
+      z0 = 0.0
+      z1 = ZLENGTH
+
+      call rescale_x(zm1,z0,z1)
+
+      do iel=1,nelt
+      do ifc=1,2*ndim
+         if (cbc(ifc,iel,1) .eq. 'v  ') boundaryID(ifc,iel) = 1
+         if (cbc(ifc,iel,1) .eq. 'o  ') boundaryID(ifc,iel) = 2
+         if (cbc(ifc,iel,1) .eq. 'W  ') boundaryID(ifc,iel) = 3
+      enddo
+      enddo
+
+      call set_obj('W  ') ! for nusselt
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat3
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine set_obj(cb3)  ! define objects for surface integrals
+c
+      include 'SIZE'
+      include 'TOTAL'
+
+      character*3 cb3
+      integer e,f,eg
+
+      nobj = 1  ! 2 Objects:  End Faces; Cylinder Surface
+      iobj = 0
+
+      if (maxobj.lt.nobj) call exitti('increase maxobj in SIZE$',nobj)
+
+      nxyz  = lx1*ly1*lz1
+      nface = 2*ldim
+
+      do e=1,nelv
+      do f=1,nface
+         if (cbc(f,e,1).eq.cb3) then
+
+            rad=xm1(1,1,1,e)**2+ym1(1,1,1,e)**2
+            rad=sqrt(rad)
+            if (rad.lt.1.0) then ! Element is near inner cylinder 
+               iobj = 1
+               nmember(iobj) = nmember(iobj) + 1
+               mem = nmember(iobj)
+               eg  = lglel(e)
+               object(iobj,mem,1) = eg
+               object(iobj,mem,2) = f
+            endif
+
+         endif
+      enddo
+      enddo
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine compute_nusselt(nu)
+
+c     integrated flux
+
+      include 'SIZE'
+      include 'TOTAL'
+
+      real nu,a(2),q(2)
+
+      parameter (lt=lx1*ly1*lz1*lelt)
+      common /scruz/ tx(lt),ty(lt),tz(lt),work(lx1*ly1*lz1)
+
+      integer e,f,eg
+
+      if (istep.eq.0) call set_obj  ! define objects for surface integrals
+
+      call gradm1(tx,ty,tz,t)
+
+      call rzero(a,2)
+      call rzero(q,2)
+
+      do iobj=1,nobj
+         do mem=1,nmember(iobj)
+            eg=object(iobj,mem,1)
+            f =object(iobj,mem,2)
+            e =gllel(eg)
+            call surface_flux_area_local(dq,aq,tx,ty,tz,e,f,work)
+            a(iobj) = a(iobj) + aq
+            q(iobj) = q(iobj) + dq
+         enddo
+      enddo
+      call gop(a,work,'+  ',2)
+      call gop(q,work,'+  ',2)
+      nu = q(1)/a(1)
+      if (nio.eq.0) write(6,1) istep,time,q(1),a(1),nu
+    1 format(i9,1p4e12.4,' nusselt(5k)')
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine surface_flux_area_local(dq,aq,qx,qy,qz,e,f,w)
+c
+c     Here, we create a copy of the V19 subroutine surface_flux_area, 
+c     just to ensure compatability with both V19 and V17.
+c
+      include 'SIZE'
+      include 'GEOM'
+      include 'INPUT'
+      include 'PARALLEL'
+      include 'TOPOL'
+      parameter (l=lx1*ly1*lz1)
+      real qx(l,1),qy(l,1),qz(l,1),w(lx1,ly1,lz1)
+      integer e,f
+      call           faccl3  (w,qx(1,e),unx(1,1,f,e),f)
+      call           faddcl3 (w,qy(1,e),uny(1,1,f,e),f)
+      if (if3d) call faddcl3 (w,qz(1,e),unz(1,1,f,e),f)
+      call dsset(lx1,ly1,lz1)
+      iface  = eface1(f)
+      js1    = skpdat(1,iface)
+      jf1    = skpdat(2,iface)
+      jskip1 = skpdat(3,iface)
+      js2    = skpdat(4,iface)
+      jf2    = skpdat(5,iface)
+      jskip2 = skpdat(6,iface)
+      dq = 0
+      aq = 0
+      i  = 0
+      do 100 j2=js2,jf2,jskip2
+      do 100 j1=js1,jf1,jskip1
+         i = i+1
+         dq    = dq + area(i,1,f,e)*w(j1,j2,1)
+         aq    = aq + area(i,1,f,e)
+  100 continue
+      return
+      end
+c-----------------------------------------------------------------------

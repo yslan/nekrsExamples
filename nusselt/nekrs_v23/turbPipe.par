@@ -1,0 +1,37 @@
+[GENERAL]
+#verbose = true
+polynomialOrder = 7
+#startFrom = "restart.fld"
+#stopAt = endTime
+#endTime = 200
+numSteps = 200
+
+dt = 6.0e-3
+timeStepper = tombo2
+subCyclingSteps = 2
+
+writeControl = simulationTime 
+writeInterval = 20
+
+regularization = hpfrt + nModes=1 + scalingCoeff=10
+
+[PRESSURE]
+residualTol = 1e-04
+
+[VELOCITY]
+boundaryTypeMap = inlet, outlet, wall
+viscosity = -19000
+density = 1.0
+residualTol = 1e-06
+
+[TEMPERATURE]
+boundaryTypeMap = codedFixedValue, zeroFlux, flux
+residualTol = 1e-06
+rhoCp = 1.0
+conductivity = -5000
+
+[CASEDATA]
+#/* diameters  */
+ZLENGTH = 20.0
+NSLABS  = 60
+NELSLAB = 108

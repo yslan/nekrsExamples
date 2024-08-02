@@ -19,3 +19,6 @@ Here we focus on porting Nek5000 functionality into NekRS
 
 - hmhSolver   
   solve extra Helmholtz solvers in `UDF_ExecuteStep`
+
+- nusselt
+  Compute nusselt number on given surface

@@ -1,0 +1,65 @@
+//
+// nekRS User Defined File
+//
+#include "udf.hpp"
+#include "plugins/velRecycling.hpp"
+#include "comp_nusselt.hpp"
+
+static dfloat ZLENGTH;
+static int NSLABS;
+static int NELSLAB;
+
+#ifdef __okl__
+
+#include "turbPipe.oudf"
+
+#endif
+
+void UDF_LoadKernels(occa::properties &kernelInfo)
+{   
+  nusselt::buildKernel(kernelInfo);
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  platform->par->extract("casedata", "zlength", ZLENGTH);
+  platform->par->extract("casedata", "nslabs", NSLABS);
+  platform->par->extract("casedata", "nelslab", NELSLAB);
+  if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+    double *const nek_cb_scnrs = (double *)nek::ptr("cb_scnrs");
+    nek_cb_scnrs[0] = ZLENGTH;
+    nek_cb_scnrs[1] = NSLABS;
+    nek_cb_scnrs[2] = NELSLAB;
+  }
+}
+
+void UDF_Setup(nrs_t *nrs)
+{
+  // setup scratch space
+  platform_t *platform = platform_t::getInstance();
+  nrs->o_usrwrk = platform->device.malloc(nrs->NVfields * nrs->fieldOffset, sizeof(dfloat));
+
+  // recycling
+  const dfloat wbar = 1.0;
+  const int bID = 1;
+  dfloat zRecycLayer = 0.25 * ZLENGTH;
+  const hlong offset = NELSLAB * round(NSLABS * zRecycLayer / ZLENGTH);
+  velRecycling::setup(nrs, nrs->o_usrwrk, offset, bID, wbar);
+
+  nusselt::setup(nrs->meshV, nrs->fieldOffset);
+}
+
+void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
+{
+  velRecycling::copy();
+
+  bool print = true;                // print the number
+  std::vector<int> bidWall = {3};   // boundary id for surface(s)
+  auto nu = nusselt::compute(nrs, bidWall, nrs->cds->o_S, time, tstep, print);
+
+//  if (nrs->isOutputStep) {
+  if (tstep % 10 == 0) {
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+}
