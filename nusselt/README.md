@@ -7,14 +7,10 @@ $$Nu = \frac{h L}{k}$$
 
 - $L$: Characteristic length
 - $k$: Thermal conductivity
-- $h$: Heat transfer coefficient
+- $h$: Heat transfer coefficient $h = (-k_{fluid}\ \nabla T\cdot{n} )\ / \ (T_s-T_\infty)$
 
-$$h = \frac{-k_{fluid} \nabla\T\cdot{n}}{T_s-T_\infty}$$
-
-Under non-dimensionalization, $\hat{T} = \frac{T-T_{\infty}}{\delta T}$ with $\deltaT={T_s-T_\infty}$, the averaged Nusselt number is computed as the surface integral
-
-$$\bar{Nu} = \frac{1}{|S|} \int_S \nabla T \cdot \vec{n} dS$$
-where $S$ is the target surface and $|S|$ is its area.
+Under non-dimensionalization, $\hat{T} = (T\ -\ T_{\infty})\ /\ \delta T$ with $\delta T = (T_s\ -\ T_\infty)$, the averaged Nusselt number is computed as the surface integral
+$\bar{Nu} = \frac{1}{|S|} \int_S \nabla T \cdot \vec{n} dS$ where $S$ is the target surface and $|S|$ is its area.
 
 ### Verson
 
