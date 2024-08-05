@@ -48,7 +48,8 @@ This is the turbPipe example with unit heat flux on the surface.
 ### Verification
 
 
-It matches with the Nek5000 number (see `turbPipe.usr/userchk`)
+It matches with the Nek5000 number (see `turbPipe.usr/userchk`).
+zLength = 20 and diameter = 1, so the surface area is $20\pi$
 ```
      step        time    integral        area          Nu
       200  1.2000e+00  3.1407e+05  6.2832e+01  4.9985e+03 nusselt(rs)
