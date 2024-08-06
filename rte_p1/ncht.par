@@ -1,0 +1,41 @@
+[GENERAL]
+verbose = true
+startFrom = "ref.fld+time=0.0"
+#startFrom = "ref.fld+time=0.0+UPT"
+#startFrom = "ref.fld+time=0.0+UPTS01"
+polynomialOrder = 7
+numSteps = 1 #10 
+dt = 1e-3
+timeStepper = tombo2
+writeInterval = 1 #1000
+
+[PRESSURE]
+residualTol = 1e-06
+
+[VELOCITY]
+boundaryTypeMap = inlet,outlet,wall,wall
+residualTol = 1e-08
+
+[TEMPERATURE]
+boundaryTypeMap = inlet,outlet,flux,flux
+residualTol = 1e-08
+
+[SCALAR01]
+boundaryTypeMap = flux,flux,flux,flux # last two are actually robin
+rho = 1.0
+diffusivity = -48.0
+maxIterations = 10000
+residualTol = 1.0e-6
+solver = pgmres
+preconditioner = multigrid
+
+[CASEDATA] 
+p1_tid = 0
+p1_gid = 1
+p1_twrkid = 0
+p1_gwrkid = 1
+
+# from Kirk
+p1_tau = 4.0
+p1_bo = 57.4
+p1_eps = 0.85
