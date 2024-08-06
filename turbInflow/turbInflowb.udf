@@ -3,10 +3,9 @@
 //
 #include <numeric>
 #include "udf.hpp"
-//#include "plugins/velRecycling.hpp"
 
-
-using velInflowData = std::tuple<int, dfloat, dfloat, dfloat, dfloat>;
+// recycling inlets
+using velInflowData = std::tuple<dlong, dfloat, dfloat, dfloat, dfloat>;
 std::vector<velInflowData> velInflowList;
 
 static occa::memory o_BdryID;
@@ -17,7 +16,6 @@ static pointInterpolation_t *interpolator = nullptr;
 static occa::kernel getBCFluxKernel;
 static occa::kernel sumReductionKernel;
 
-static dfloat *flux, *area;
 static occa::memory o_flux, o_area;
 
 static dfloat *tmp1, *tmp2;
@@ -27,11 +25,9 @@ static int Nblock;
 
 #ifdef __okl__
 
-// user kernel
+// recycling kernel start
 @kernel void pasteInletVelocity(const dlong Npart,
                                 const dlong fieldOffset,
-                                const int bid,
-                                @ restrict const int *BdryID,
                                 @ restrict const dlong *BdryToV,
                                 @ restrict const dfloat *Upart,
                                 @ restrict dfloat *U)
@@ -39,12 +35,9 @@ static int Nblock;
   for (dlong n = 0; n < Npart; ++n; @tile(256, @outer, @inner)) {
     if (n < Npart) {
       const dlong v = BdryToV[n];
-      const int id = BdryID[n];
-      if (bid==id) {
-        U[0*fieldOffset + v] = Upart[0*Npart + n];
-        U[1*fieldOffset + v] = Upart[1*Npart + n];
-        U[2*fieldOffset + v] = Upart[2*Npart + n];
-      }
+      U[0*fieldOffset + v] = Upart[0*Npart + n];
+      U[1*fieldOffset + v] = Upart[1*Npart + n];
+      U[2*fieldOffset + v] = Upart[2*Npart + n];
     }   
   } 
 }
@@ -52,23 +45,24 @@ static int Nblock;
 @kernel void scaleInletVelocity(const dlong Npart,
                                 const dlong fieldOffset,
                                 const dfloat scale,
-                                const int bid,
-                                @ restrict const int *BdryID,
+                                const dlong bid,
+                                @ restrict const dlong *BdryID,
                                 @ restrict const dlong *BdryToV,
                                 @ restrict dfloat *U)
 { 
   for (dlong n = 0; n < Npart; ++n; @tile(256, @outer, @inner)) {
     if (n < Npart) {
       const dlong v = BdryToV[n];
-      const int id = BdryID[n];
+      const dlong id = BdryID[n];
       if (bid==id) {
         U[0*fieldOffset + v] *= scale;
         U[1*fieldOffset + v] *= scale;
         U[2*fieldOffset + v] *= scale;
       }
-    } 
+    }
   }
 }
+// recycling kernel ends
 
 void velocityDirichletConditions(bcData *bc)
 {
@@ -95,21 +89,25 @@ void setupRecycledInflow(nrs_t *nrs)
   // count total number faces
   dlong nface = 0;
   for (auto &entry : velInflowList) {
-    const int bidInlet = std::get<0>(entry);
-    dlong nface_i = 0;
+    const dlong bidInlet = std::get<0>(entry);
+    const dfloat dx = std::get<1>(entry);
+    const dfloat dy = std::get<2>(entry);
+    const dfloat dz = std::get<3>(entry);
+    const dfloat targetUbar = std::get<4>(entry);
+    dlong nfacei = 0;
     for (dlong e = 0; e<mesh->Nelements; e++) {
       for (int f = 0; f < mesh->Nfaces; f++) {
         if (mesh->EToB[f + mesh->Nfaces * e] == bidInlet) {
-          nface_i++;
+          nfacei++;
           nface++;
         }
       }
     }
 
-    dlong nfaceg = nface_i;
-    MPI_Allreduce(MPI_IN_PLACE, &nfaceg, 1, MPI_DLONG, MPI_SUM, platform->comm.mpiComm);
+    MPI_Allreduce(MPI_IN_PLACE, &nfacei, 1, MPI_DLONG, MPI_SUM, platform->comm.mpiComm);
     if (platform->comm.mpiRank==0)
-      printf("setupRecycledInflow, bid = %d, nface = %d\n", bidInlet, nfaceg);
+      printf("setupRecycledInflow, bid = %d, nface = %d, dx = %g %g %g, ubar = %g\n",
+             bidInlet, nfacei, dx, dy, dz, targetUbar);
   }
 
   const dlong npts = nface * mesh->Nfp;
@@ -118,9 +116,9 @@ void setupRecycledInflow(nrs_t *nrs)
   occa::memory o_xpart = platform->device.malloc(npts, sizeof(dfloat));
   occa::memory o_ypart = platform->device.malloc(npts, sizeof(dfloat));
   occa::memory o_zpart = platform->device.malloc(npts, sizeof(dfloat));
-  o_BdryID = platform->device.malloc(npts, sizeof(int));
+  o_BdryID  = platform->device.malloc(npts, sizeof(dlong));
   o_BdryToV = platform->device.malloc(npts, sizeof(dlong));
-  o_Upart = platform->device.malloc(nrs->NVfields * npts, sizeof(dfloat));
+  o_Upart   = platform->device.malloc(nrs->NVfields * npts, sizeof(dfloat));
 
   const dlong NfpTotal = mesh->Nelements * mesh->Nfaces * mesh->Nfp;
 
@@ -130,19 +128,17 @@ void setupRecycledInflow(nrs_t *nrs)
   o_tmp1 = platform->device.malloc(Nblock * sizeof(dfloat));
   o_tmp2 = platform->device.malloc(Nblock * sizeof(dfloat));
                          
-  flux = (dfloat *)calloc(NfpTotal, sizeof(dfloat));
-  area = (dfloat *)calloc(NfpTotal, sizeof(dfloat));
   o_flux = platform->device.malloc(NfpTotal * sizeof(dfloat));
   o_area = platform->device.malloc(NfpTotal * sizeof(dfloat));
 
   {
     // set id mapping: from bdry to volume index
-    std::vector<int> BdryID(npts, -1);
+    std::vector<dlong> BdryID(npts, -1);
     std::vector<dlong> BdryToV(npts, -1);
 
     dlong ia = 0;
     for (auto &entry : velInflowList) {
-      const int bidInlet = std::get<0>(entry);
+      const dlong bidInlet = std::get<0>(entry);
       for (dlong e = 0; e < mesh->Nelements; e++) {
         for (int f = 0; f < mesh->Nfaces; f++) {
           if (mesh->EToB[f + mesh->Nfaces * e] == bidInlet) {
@@ -156,7 +152,7 @@ void setupRecycledInflow(nrs_t *nrs)
         }
       }
     }
-    o_BdryID.copyFrom(BdryID.data(), npts * sizeof(int));
+    o_BdryID.copyFrom(BdryID.data(), npts * sizeof(dlong));
     o_BdryToV.copyFrom(BdryToV.data(), npts * sizeof(dlong));
 
     // set location: from inlet to target location
@@ -165,12 +161,12 @@ void setupRecycledInflow(nrs_t *nrs)
     std::vector<dfloat> zpart(npts, 0.0);
 
     for (auto &entry : velInflowList) {
-      const int bidInlet = std::get<0>(entry);
+      const dlong bidInlet = std::get<0>(entry);
       const dfloat dx = std::get<1>(entry);
       const dfloat dy = std::get<2>(entry);
       const dfloat dz = std::get<3>(entry);
       for (dlong i = 0; i < npts; i++) {
-        const int bid = BdryID[i];
+        const dlong bid = BdryID[i];
         const dlong v = BdryToV[i];
         if (bid == bidInlet) {
           xpart[i] = mesh->x[v] + dx;
@@ -189,26 +185,24 @@ void setupRecycledInflow(nrs_t *nrs)
   interpolator->find();
 }
 
-void updateRecycledVelocity(nrs_t *nrs)
+void updateRecycledVelocity(nrs_t *nrs, int verbose)
 {
   mesh_t *mesh = nrs->meshV;
   const dlong NfpTotal = mesh->Nelements * mesh->Nfaces * mesh->Nfp;
   dlong npts = interpolator->numPoints();
   interpolator->eval(nrs->NVfields, nrs->fieldOffset, nrs->o_U, npts, o_Upart);
 
+  pasteInletVelocity(npts,
+                     nrs->fieldOffset,
+                     o_BdryToV,
+                     o_Upart,
+                     nrs->o_usrwrk);
+
+  // rescale
   for (auto &entry : velInflowList) {
-    const int bidInlet = std::get<0>(entry);
+    const dlong bidInlet = std::get<0>(entry);
     const dfloat targetUbar = std::get<4>(entry);
 
-    pasteInletVelocity(npts,
-                       nrs->fieldOffset,
-                       bidInlet,
-                       o_BdryID,
-                       o_BdryToV,
-                       o_Upart,
-                       nrs->o_usrwrk);
-
-    // rescale
     getBCFluxKernel(mesh->Nelements,
                     bidInlet,
                     nrs->fieldOffset,
@@ -238,6 +232,10 @@ void updateRecycledVelocity(nrs_t *nrs)
                        o_BdryID,
                        o_BdryToV,
                        nrs->o_usrwrk);
+
+    if (verbose>0 && platform->comm.mpiRank==0)
+      printf("updateRecycledVelocity, bid = %d, targetUbar = %g, area = %g flux = %g scale = %g\n",
+             bidInlet, targetUbar, sbuf[0], sbuf[1], scale);
   }
 }
 
@@ -262,19 +260,15 @@ void UDF_Setup(nrs_t *nrs)
 {
   nrs->o_usrwrk = platform->device.malloc(nrs->NVfields * nrs->fieldOffset, sizeof(dfloat));
 
-  int bID = 1; // inlet's boundary id
-  const dfloat dx = 5.0;
-  const dfloat dy = 0.0;
-  const dfloat dz = 0.0;
-  const dfloat ubar = 1.0;
-
-  velInflowList.push_back(std::tuple{bID, dx, dy, dz, ubar});
+  // Each entity is a set of {bID, dx, dy, dz, targetUbar}
+  velInflowList.push_back(std::tuple{1, 5.0, 0.0, 0.0, 1.0});
   setupRecycledInflow(nrs);
 }
 
 void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
 {
-  updateRecycledVelocity(nrs);
+  int verbose = (tstep % 10 == 0) ? 1 : 0;
+  updateRecycledVelocity(nrs, verbose);
 
   // chk: Compute perturbation energy
   occa::memory o_UX = nrs->o_U + 0 * nrs->fieldOffset * sizeof(dfloat);

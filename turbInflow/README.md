@@ -1,21 +1,20 @@
 ## Recycled Inflow
 
-turbInflow example, copied from an old NekExamples.      
+turbInflow example, copied from an old NekExamples.
 
 Half channel flow with v/O/W/W/W/SYM       
 The inlet velocity is recycled at the shifted location with vector (5,0,0) via findpt.     
 It's also rescaled to the target ubar.
 
 The nekrs recycle function is initialted by Ansh.
-See `UDF_Setup` for control.
+See `UDF_Setup` for setting up the boundaryID of inlet, shift vector and the targetUbar..
 
 08/05/24: Now we support multiple inlet rescaling.
-User can add tuple of `{bID, dx, dy, dz, ubar}` for each set.
+User can add tuple of `{bID, dx, dy, dz, ubar}` for each recycling set.
 ```
 velInflowList.push_back(std::tuple{bID1, dx1, dy1, dz1, ubar1});
 velInflowList.push_back(std::tuple{bID2, dx2, dy2, dz2, ubar2});
 ```
-
 
 
 ### Verson
