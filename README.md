@@ -23,5 +23,5 @@ Here we focus on porting Nek5000 functionality into NekRS
 - nusselt
   Compute nusselt number on given surface
 
-- nusselt
+- rte_p1
   radiation transfer, P1 model
