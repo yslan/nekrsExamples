@@ -1,0 +1,217 @@
+//
+// nekRS User Defined File
+//
+#include "hmh_solver.hpp"
+#include "rteP1Model.hpp"
+
+#ifdef __okl__
+
+#include "sgpcht.oudf"
+
+#endif
+
+// vp
+static int updateProperties = 1;
+static dfloat rho, mue, rhoCpFluid, rhoCpSolid, conFluid, conSolid;
+
+// P1, for checking only
+std::vector<int> TbidInterfaceFluid, TbidInterfaceSolid;
+
+// nusselt
+dfloat nusseltAarea = 0.0;
+int nusseltCalled = false;
+
+dfloat compute_nusselt(mesh_t *mesh, const int fieldOffset, std::vector<int> bIDList,
+                       occa::memory o_Temp, const double time, const int tstep) {
+// FIXME, this prints wrong results?
+
+  auto nbid = bIDList.size();
+  if (nbid == 0) return 0.0;
+  auto o_bid = platform->o_memPool.reserve<int>(nbid);
+  o_bid.copyFrom(bIDList.data(), nbid);
+
+  // dTdn
+  auto o_grad = platform->o_memPool.reserve<dfloat>(3*fieldOffset);
+  opSEM::strongGrad(mesh, fieldOffset, o_Temp, o_grad);
+  oogs::startFinish(o_grad, 3, fieldOffset, ogsDfloat, ogsAdd, mesh->oogs);
+  platform->linAlg->axmyMany(mesh->Nlocal, 3, fieldOffset, 0, 1.0, mesh->o_invLMM, o_grad);
+
+  auto flux = meshT->surfaceAreaNormalMultiplyIntegrate(
+                                      fieldOffset,
+                                      nbid,
+                                      o_bid,
+                                      o_grad).at(0);
+
+  if (!nusseltCalled) {
+    auto o_one = platform->o_memPool.reserve<dfloat>(fieldOffset);
+    platform->linAlg->fill(mesh->Nlocal, 1.0, o_one);
+    nusseltAarea = mesh->surfaceAreaMultiplyIntegrate(nbid, o_bid, o_one).at(0);
+    nusseltCalled = true;
+  }
+
+  dfloat nu = flux / nusseltAarea;
+  if (platform->comm.mpiRank == 0) {
+    printf("%9d %11.4e %11.4e %11.4e %11.4e nusselt(rs)\n", tstep, time, flux, nusseltAarea, nu);
+  }
+
+  return nu;
+}
+
+occa::memory userScalarImplicitTerm(double time, int scalarIdx)
+{
+  return rteP1Model::o_implicitRobinLHS_g(scalarIdx);
+}
+
+void userq(double time)
+{
+  auto meshT = nrs->cds->mesh[0];
+  auto o_FS = nrs->cds->o_NLT + nrs->cds->fieldOffsetScan[0];
+
+  const dfloat qvolFluid = 0.0;
+  const dfloat qvolSolid = 0.06;          //0.01 on surface 0.06 on volume
+  cFill(meshT->Nelements, qvolFluid, qvolSolid, meshT->o_elementInfo, o_FS);
+
+  auto o_Tsrc = rteP1Model::o_radiationSource_t();
+  platform->linAlg->axpby(meshT->Nlocal, 1.0, o_Tsrc, 1.0, o_FS);
+}
+
+void uservp(double time)
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+  auto cds = nrs->cds;
+  auto meshV = nrs->meshV;
+  auto meshT = cds->mesh[0];
+  
+  if(updateProperties) {
+    if(platform->comm.mpiRank == 0) {
+      printf("updating properties, time= %g, rho=%g, mue=%g",time,rho,mue);
+      printf(", rhoCpFluid=%g, rhoCpSolid=%g, conFluid=%g, conSolid=%g\n",
+             rhoCpFluid, rhoCpSolid, conFluid, conSolid);
+    }
+
+    // velocity
+    const auto o_mue = nrs->o_prop.slice(0 * nrs->fieldOffset);
+    const auto o_rho = nrs->o_prop.slice(1 * nrs->fieldOffset);
+    cFill(meshV->Nelements, mue, 0, meshV->o_elementInfo, o_mue);
+    cFill(meshV->Nelements, rho, 0, meshV->o_elementInfo, o_rho);
+    
+    // temperature
+    const auto o_rhoCp = cds->o_rho + cds->fieldOffsetScan[0];
+    const auto o_con = cds->o_diff + cds->fieldOffsetScan[0];
+    cFill(meshT->Nelements, conFluid, conSolid, meshT->o_elementInfo, o_con);
+    cFill(meshT->Nelements, rhoCpFluid, rhoCpSolid, meshT->o_elementInfo, o_rhoCp);
+    updateProperties = 0;
+  }
+}
+
+void UDF_LoadKernels(deviceKernelProperties& kernelInfo)
+{   
+  rteP1Model::buildKernel(kernelInfo);
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  // cht coef
+  rho = 1.0;
+  mue = 1/20.0;                                 // Re = 20
+  rhoCpFluid = rho * 1.0;                       
+  conFluid = mue/10.0;                          // Pr = 10
+  rhoCpSolid = 1730.0*2048.6/(1923.0*2386.0);   // rhoCp_solid/rhoCp_fluid
+  conSolid = (1/(20.0*10.0)) * (30.92/1.1);     // cond_solid/xxx
+
+#if 1
+  rteP1Model::setup0(); // Load param from default, or par->casedata
+#else // another interface
+  rteP1Model::setup0(p1_tid, p1_gid,         // scalar id
+                     p1_twrkid, p1_gwrkid,   // usrwrk id
+                     p1_tau, p1_bo, p1_eps); // constants
+#endif
+  rteP1Model::sendParamToNek(); // send rte's param to usr, for checking only
+
+  // send to Nek5000
+  if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+    *nek::ptr<double>("p_rhoCpFluid") = rhoCpFluid;
+    *nek::ptr<double>("p_rhoCpSolid") = rhoCpSolid;
+    *nek::ptr<double>("p_conFluid") = conFluid;
+    *nek::ptr<double>("p_conSolid") = conSolid;
+  }
+}
+
+void UDF_Setup()
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+
+  // Allocate for BC
+  nrs->o_usrwrk.resize(2 * nrs->fieldOffset);
+
+  // user func
+  nrs->userScalarSource = &userq;
+  nrs->userProperties = &uservp;
+  nrs->userScalarImplicitLinearTerm = &userScalarImplicitTerm; // P1
+
+  // P1: set up Robin BC id
+  std::vector<int> GbidRobin = {3,4};
+  rteP1Model::setup(nrs, GbidRobin);
+
+  // P1: bid of fluid-solid interface, for checking only
+  TbidInterfaceFluid.assign({4}); 
+  TbidInterfaceSolid.assign({5}); 
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  auto cds = nrs->cds;
+  auto meshV = nrs->meshV;
+  if (tstep == 0) rteP1Model::extraSetup(nrs);
+
+  // TODO: avg temperature here with linAlg->axpby here
+
+  // Solve G
+  if (tstep > 0) rteP1Model::solve(nrs, time, tstep);
+
+/*
+  if (tstep==0) { // clipping
+    clip(mesh->Nelements, 1.0, 4.0, o_T);
+    clip(mesh->Nelements, 1.0, 4.0, o_G);
+  }
+*/
+
+
+  if (tstep % 100 == 0 || nrs->isCheckpointStep) {
+    // Print min/max
+    auto printMinMax = [&](std::string tag, const occa::memory& o_u)
+    {
+      const auto Nlocal = o_u.length();
+      const auto umin = platform->linAlg->min(Nlocal, o_u, platform->comm.mpiComm);
+      const auto umax = platform->linAlg->max(Nlocal, o_u, platform->comm.mpiComm);
+      if (platform->comm.mpiRank == 0) {
+        printf("chk min/max %d %2.4e %6s %13.6e %13.6e\n", tstep, time, tag.c_str(), umin, umax);
+      }
+    };
+    printMinMax("UX", nrs->o_U.slice(0 * nrs->fieldOffset, meshV->Nlocal));
+    printMinMax("UY", nrs->o_U.slice(1 * nrs->fieldOffset, meshV->Nlocal));
+    printMinMax("UZ", nrs->o_U.slice(2 * nrs->fieldOffset, meshV->Nlocal));
+    printMinMax("PR", nrs->o_P.slice(0 * nrs->fieldOffset, meshV->Nlocal));
+    printMinMax("T", cds->o_S.slice(cds->fieldOffsetScan[0], cds->mesh[0]->Nlocal));
+    printMinMax("G", cds->o_S.slice(cds->fieldOffsetScan[1], meshV->Nlocal));
+
+    // Check flux, FIXME, a bug in this chk function
+    //rteP1Model::checkCHTFlux(nrs, time, tstep, conFluid, conSolid,
+    //                         TbidInterfaceFluid, TbidInterfaceSolid);
+
+    // FIXME, the results are not correct...
+    auto nu = compute_nusselt(meshT, cds->fieldOffset[0],
+                              TbidInterfaceFluid, cds->o_S, time, tstep);
+
+    // Check flux in usr, cross reference
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+   
+/*
+  if (nrs->isCheckpointStep) {
+    nek::ocopyToNek(time, tstep);
+    nek::userchk(); 
+  }
+*/
+}

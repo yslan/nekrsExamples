@@ -24,6 +24,23 @@ static double timerTotalCalled = 0.0; // total time spent in hmhSolver
 static int numTotalCalled = 0;
 }
 
+static void turnOnCdsCompute(cds_t *cds, const int is_in)
+{
+  cdsComputeBak.resize(cds->NSfields,0);
+  for (int is = 0; is < cds->NSfields; is++) {
+    cdsComputeBak.at(is) = cds->compute[is];
+    cds->compute[is] = 0;
+  }
+  cds->compute[is_in] = 1;
+}
+
+static void recoverCdsCompute(cds_t *cds)
+{
+  for (int is = 0; is < cds->NSfields; is++) {
+    cds->compute[is] = cdsComputeBak.at(is);
+  }
+}
+
 static void initialization(const int NSfields)
 {
   nekrsCheck(initCalled,
@@ -43,27 +60,10 @@ static void initialization(const int NSfields)
   initCalled = true;
 }
 
-static void turnOnCdsCompute(cds_t *cds, const int is_in)
-{
-  cdsComputeBak.resize(cds->NSfields,0);
-  for (int is = 0; is < cds->NSfields; is++) {
-    cdsComputeBak.at(is) = cds->compute[is];
-    cds->compute[is] = 0;
-  }
-  cds->compute[is_in] = 1;
-}
-
-static void recoverCdsCompute(cds_t *cds)
-{
-  for (int is = 0; is < cds->NSfields; is++) {
-    cds->compute[is] = cdsComputeBak.at(is);
-  }
-}
-
-
 // setup elliptic solver
 void hmhSolver::setup(nrs_t *nrs, const int is)
 {
+  nrs = dynamic_cast<nrs_t *>(platform->solver);
   cds_t *cds = nrs->cds;
   const int NSfields = (cds) ? cds->NSfields : 0;
 
@@ -89,7 +89,6 @@ void hmhSolver::setup(nrs_t *nrs, const int is)
              "scalarId %d needed to be turned on in par!!\n",
              is);
 
-  const auto solverName = cds->cvodeSolve[is] ? "CVODE" : "ELLIPTIC";
   nekrsCheck(cds->cvodeSolve[is],
              platform->comm.mpiComm,
              EXIT_FAILURE,
@@ -260,10 +259,12 @@ void hmhSolver::solve(nrs_t *nrs, const int is, const dfloat timeNew, const int 
   // main solve
   std::string precUpdateBackUp;
   platform->options.getArgs("ELLIPTIC PRECO COEFF FIELD", precUpdateBackUp);
-  platform->options.setArgs("ELLIPTIC PRECO COEFF FIELD", "TRUE");
+  platform->options.setArgs("ELLIPTIC PRECO COEFF FIELD", "TRUE"); //FIXME gmres
+
   platform->timer.tic("myHmhSolver::S" + sid + "::solve");
   cds->solver[is]->solve(o_lambda0, o_lambda1, o_rhs, o_S);
   platform->timer.toc("myHmhSolver::S" + sid + "::solve");
+
   platform->options.setArgs("ELLIPTIC PRECO COEFF FIELD", precUpdateBackUp);
   o_S.copyTo(cds->o_S, cds->fieldOffset[is], cds->fieldOffsetScan[is]);
 

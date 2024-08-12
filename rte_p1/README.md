@@ -1,6 +1,6 @@
 # (WIP) Radiation P1 Model
 
-- version: v24 (repo/next, 08/06/24)
+- version: v24 (repo/next, 08/12/24)
 
 ### Equations
 
