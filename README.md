@@ -17,11 +17,11 @@ Here we focus on porting Nek5000 functionality into NekRS
 - robin     
   Robin BC, or Newton cooling BC in Nek5000
 
-- hmhSolver   
+- hmhSolver    
   solve extra Helmholtz solvers in `UDF_ExecuteStep`
 
-- nusselt
+- nusselt      
   Compute nusselt number on given surface
 
-- rte_p1
+- rte_p1    
   radiation transfer, P1 model
