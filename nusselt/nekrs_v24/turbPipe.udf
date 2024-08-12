@@ -1,0 +1,92 @@
+//
+// nekRS User Defined File
+//
+#include "udf.hpp"
+#include "plugins/velRecycling.hpp"
+
+static dfloat ZLENGTH;
+
+#ifdef __okl__
+
+#include "turbPipe.oudf"
+
+#endif
+
+// nusselt
+dfloat surface_area = 0.0;
+int isCalled = 0;
+
+double compute_nusselt(std::vector<int> bIDList, occa::memory o_Temp,
+                       const double time, const int tstep) {
+
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+  auto cds = nrs->cds;
+  auto meshT = cds->mesh[0];
+  auto fieldOffset = cds->fieldOffset[0];
+
+  auto nbid = bIDList.size();
+  if (nbid == 0) return 0.0;
+  auto o_bid = platform->o_memPool.reserve<int>(nbid);
+  o_bid.copyFrom(bIDList.data(), nbid);
+
+  // dTdn
+  auto o_gradT = opSEM::strongGrad(meshT, fieldOffset, o_Temp); // weak grad
+  oogs::startFinish(o_gradT, 3, fieldOffset, ogsDfloat, ogsAdd, meshT->oogs);
+  platform->linAlg->axmyMany(meshT->Nlocal, 3, fieldOffset, 0, 1.0, meshT->o_invLMM, o_gradT);
+
+  auto flux = meshT->surfaceAreaNormalMultiplyIntegrate(
+                                      fieldOffset,
+                                      nbid, 
+                                      o_bid, 
+                                      o_gradT).at(0);
+
+  if (isCalled==0) {
+    auto o_one = platform->o_memPool.reserve<dfloat>(fieldOffset);
+    platform->linAlg->fill(meshT->Nlocal, 1.0, o_one);
+    auto area = meshT->surfaceAreaMultiplyIntegrate(nbid, o_bid, o_one).at(0);
+    surface_area = area;
+    isCalled = 1;
+  }
+
+  double nu = flux / surface_area;
+  if (platform->comm.mpiRank == 0) {
+    printf("%9d %11.4e %11.4e %11.4e %11.4e nusselt(rs)\n", tstep, time, flux, surface_area, nu);
+  } 
+  return nu;
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  platform->par->extract("casedata", "zlength", ZLENGTH);
+  if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+    *nek::ptr<double>("ZLENGTH") = ZLENGTH;
+  }
+}
+
+void UDF_Setup()
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+  // setup scratch space
+  platform_t *platform = platform_t::getInstance();
+  nrs->o_usrwrk.resize(nrs->NVfields * nrs->fieldOffset);
+
+  // recycling
+  const dfloat uBulk = 1.0;
+  const int bID = 1;
+  const dfloat zRecycLayer = 0.25 * ZLENGTH;
+  velRecycling::setup(nrs->o_usrwrk, 0.0, 0.0, zRecycLayer, bID, uBulk);
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  velRecycling::copy();
+
+  std::vector<int> bidWall = {3};
+  auto nu = compute_nusselt(bidWall, nrs->cds->o_S, time, tstep);
+
+//  if (nrs->isOutputStep) {
+  if (tstep % 10 == 0) {
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+}

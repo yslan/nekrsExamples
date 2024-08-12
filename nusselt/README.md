@@ -1,5 +1,7 @@
 # Computation of Nusselt number
 This compute the averaged Nusselt number on given surface(s)
+We use turbPipe example with unit heat flux on the surface.
+
 
 ### Formulation
 
@@ -12,37 +14,47 @@ $$Nu = \frac{h L}{k}$$
 Under non-dimensionalization, $\hat{T} = (T\ -\ T_{\infty})\ /\ \delta T$ with $\delta T = (T_s\ -\ T_\infty)$, the averaged Nusselt number is computed as the surface integral
 $\bar{Nu} = \frac{1}{|S|} \int_S \nabla T \cdot \vec{n} dS$ where $S$ is the target surface and $|S|$ is its area.
 
-### Verson
+### Versons anf Usage
 
-- NekRS version: v23
+- `nekrs_v23/`: Use NekRS version: v23 (repo/master, tag: v23.0)
 
-### Usage
-This is the turbPipe example with unit heat flux on the surface.
 
-- Include the file in udf
-  ```
-  #include "comp_nusselt.hpp"
-  ```
+   - Include the file in udf
+     ```
+     #include "comp_nusselt.hpp"
+     ```
+   
+   - Build kernel in `UDF_LoadKernels`
+     ```
+     void UDF_LoadKernels(occa::properties &kernelInfo)
+     {
+       nusselt::buildKernel(kernelInfo);
+     }
+     ```
+   
+   - Allocate array size in `UDF_Setup`
+     ```
+     nusselt::setup(nrs->meshV, nrs->fieldOffset);
+     ```
+   
+   - Compute and print with the number with the following call
+     ```
+     bool print = true;                // print the number 
+     std::vector<int> bidWall = {3};   // boundary id for surface(s)
+     auto nu = nusselt::compute(nrs, bidWall, nrs->cds->o_S, time, tstep, print);
+     ```
 
-- Build kernel in `UDF_LoadKernels`
-  ```
-  void UDF_LoadKernels(occa::properties &kernelInfo)
-  {
-    nusselt::buildKernel(kernelInfo);
-  }
-  ```
+- `nekrs_v24/`: Use NekRS version: v24-pre (repo/next as of 08/11/24)      
 
-- Allocate array size in `UDF_Setup`
-  ```
-  nusselt::setup(nrs->meshV, nrs->fieldOffset);
-  ```
+   - Many kernel we need are shipped with repo not.
+     One only needs to copy the function `compute_nusselt` (with 2 global variables) to udf
+     ```
+     // nusselt
+     dfloat surface_area = 0.0;
+     int isCalled = 0;
 
-- Compute and print with the number with the following call
-  ```
-  bool print = true;                // print the number 
-  std::vector<int> bidWall = {3};   // boundary id for surface(s)
-  auto nu = nusselt::compute(nrs, bidWall, nrs->cds->o_S, time, tstep, print);
-  ```
+     double compute_nusselt( ...
+     ```
 
 
 ### Verification
