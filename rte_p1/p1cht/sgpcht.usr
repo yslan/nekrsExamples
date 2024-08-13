@@ -142,7 +142,7 @@ c      enddo
       ! chk3
       call my_cbc_chk('ccc')
       call my_bdid_chk('ccc')
-      call my_dump_bc('ccc')
+c      call my_dump_bc('ccc')
 
       return
       end
