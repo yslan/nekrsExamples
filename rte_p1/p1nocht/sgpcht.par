@@ -1,14 +1,15 @@
-[GENERAL] 
-verbose = true
+[GENERAL]
+#verbose = true
 #startFrom = "ref.fld+time=0.0"
 polynomialOrder = 7
 numSteps = 100000
 dt = 1e-3
 timeStepper = tombo2
-writeInterval = 1000
+writeInterval = 5000
 
 [PRESSURE]
 residualTol = 1e-06
+#initialGuess = projectionAconj+nVector=20
 
 [VELOCITY]
 #                    in,   out, cyl, peb
@@ -16,8 +17,8 @@ boundaryTypeMap = inlet,outlet,wall,wall
 residualTol = 1e-08
 
 [TEMPERATURE]
-#                    in,   out, cyl, peb, peb
-boundaryTypeMap = inlet,outlet,flux,flux,flux
+#                    in,   out, cyl, peb
+boundaryTypeMap = inlet,outlet,flux,flux
 residualTol = 1e-08
 
 [SCALAR01]
@@ -26,9 +27,10 @@ boundaryTypeMap = flux,flux,flux,flux # last two are actually robin
 rho = 1.0
 diffusivity = -48.0
 maxIterations = 1000
-residualTol = 1.0e-8
+residualTol = 1.0e-6
 #solver = pgmres
 preconditioner = multigrid
+initialGuess = projectionAconj+nVector=20
 
 [CASEDATA]
 p1_tid = 0

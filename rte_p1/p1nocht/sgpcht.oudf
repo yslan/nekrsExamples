@@ -1,0 +1,71 @@
+@kernel void cFill(const dlong Nelements,
+                   const dfloat CONST1,
+                   const dfloat CONST2,
+                   @restrict const dlong * eInfo,
+                   @restrict dfloat * QVOL)
+{ 
+  for(dlong e=0;e<Nelements;++e;@outer(0)){
+    const dlong solid = eInfo[e];
+    for(int n=0;n<p_Np;++n;@inner(0)){
+      const int id = e*p_Np + n;
+      QVOL[id] = CONST1;  
+      if (solid) QVOL[id] = CONST2;
+    }
+  }
+}
+
+@kernel void clip(const dlong Nelements,
+                  const dfloat vmin,
+                  const dfloat vmax,
+                  @restrict dfloat * VAR)
+{ 
+  for(dlong e=0;e<Nelements;++e;@outer(0)){
+    for(int n=0;n<p_Np;++n;@inner(0)){
+      const int id = e*p_Np + n;
+      if(VAR[id]>vmax) {
+        VAR[id] = vmax;
+      }
+      if(VAR[id]<vmin) {
+        VAR[id] = vmin;
+      }
+    }
+  }
+}
+
+// Boundary conditions
+void velocityDirichletConditions(bcData *bc)
+{
+  bc->u = 0.0;
+  bc->v = 0.0;
+  bc->w = 1.0;
+}
+
+void scalarDirichletConditions(bcData *bc)
+{
+  bc->s = 1.0; // inlet: T = G = 1
+}
+
+void scalarNeumannConditions(bcData *bc)
+{
+  const dfloat tloc = bc->usrwrk[bc->idM + P_RTE_TWRKID * bc->fieldOffset];
+  const dfloat gloc = bc->usrwrk[bc->idM + P_RTE_GWRKID * bc->fieldOffset];
+
+  if (bc->scalarId == P_RTE_TID)
+  {
+    const dfloat t4 = tloc*tloc*tloc*tloc;
+    const dfloat g_flux = - (2.0*P_RTE_EPS) / ( P_RTE_BO * (2.0 - P_RTE_EPS) ) * (gloc-t4);
+    if (bc->id == 3) bc->flux = 0.0 - g_flux; // side wall
+    if (bc->id == 4) bc->flux = 0.01 - g_flux; // pebble surface (fluid)
+  }
+  else if (bc->scalarId == P_RTE_GID)
+  {
+    if (bc->id==3 || bc->id==4) { // Robin: h1 * dudn = - hc * (T - Tinf);
+      const dfloat hc = P_RTE_EPS / ( 2.0 * P_RTE_TAU * (2.0 - P_RTE_EPS) );
+      const dfloat tinf = tloc*tloc*tloc*tloc;
+      bc->flux = hc * tinf;
+    } else {
+      bc->flux = 0.0;                         // outlet
+    }
+  }
+}
+

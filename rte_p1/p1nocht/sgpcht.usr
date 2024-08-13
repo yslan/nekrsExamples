@@ -1,0 +1,487 @@
+      include 'my_chk.f'
+c-----------------------------------------------------------------------
+      subroutine userchk
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+
+      real p_rhoCpFluid, p_conFluid, p_rhoCpSolid, p_conSolid
+      common /my_usr_data/ p_rhoCpFluid, p_conFluid
+     $                   , p_rhoCpSolid, p_conSolid
+
+      real nu
+
+      ! cht_bid_f, cht_bid_s, con_f, con_s, yes-P1
+c      call rte_chkt_flux_cht(4,5,p_conFluid,p_conSolid,1)
+
+      ! nbid, bidList, nu(out)
+      call compute_nusselt(4, nu)
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine useric (ix,iy,iz,ieg)
+
+C     Set initial conditions
+
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      ux   = 0.0
+      uy   = 0.0
+      uz   = 1.0
+      temp = 1.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat0()
+      implicit none
+
+      real p_p1_tau, p_p1_bo, p_p1_eps
+      common /rteP1Model_data/ p_p1_tau, p_p1_bo, p_p1_eps
+
+      real p_rhoCpFluid, p_conFluid, p_rhoCpSolid, p_conSolid
+      common /my_usr_data/ p_rhoCpFluid, p_conFluid
+     $                   , p_rhoCpSolid, p_conSolid
+
+      ! P1 params
+      call nekrs_registerPtr('p_p1_tau', p_p1_tau);
+      call nekrs_registerPtr('p_p1_bo', p_p1_bo);
+      call nekrs_registerPtr('p_p1_eps', p_p1_eps);
+
+      call nekrs_registerPtr('p_rhoCpFluid', p_rhoCpFluid);
+      call nekrs_registerPtr('p_rhoCpSolid', p_rhoCpSolid);
+      call nekrs_registerPtr('p_conFluid', p_conFluid);
+      call nekrs_registerPtr('p_conSolid', p_conSolid);
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat2
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+
+      integer iel, ifc, id_face, ierr, iglmax, ntot
+      real Dp, Rs
+
+      ierr = 0
+      ntot = lx1*ly1*lz1*nelt
+
+      Dp = 0.03
+      call cmult(xm1,1/Dp,ntot)
+      call cmult(ym1,1/Dp,ntot)
+      call cmult(zm1,1/Dp,ntot)
+
+      ! print bc in re2
+      call my_cbc_chk('aaa')
+      call my_bdid_chk('aaa')
+
+      ! reconstruct boundary tags 
+      call izero(boundaryID,6*lelv)
+      call izero(boundaryIDt,6*lelt)
+      do iel=1,nelv
+      do ifc=1,2*ldim
+         id_face = bc(5,ifc,iel,1)
+         if (id_face.eq.2) then           ! inlet
+            boundaryID(ifc,iel) = 1
+            boundaryIDt(ifc,iel) = 1
+         else if (id_face.eq.3) then      ! outlet
+            boundaryID(ifc,iel) = 2
+            boundaryIDt(ifc,iel) = 2
+         else if (id_face.eq.4) then      ! pebble
+            boundaryID(ifc,iel) = 4
+            boundaryIDt(ifc,iel) = 4
+         else if (id_face.eq.5) then      ! sidewall
+            boundaryID(ifc,iel) = 3
+            boundaryIDt(ifc,iel) = 3
+         else if (id_face.eq.0) then
+         else
+            write(*,*)'invalid fluid bdid',nid,lglel(iel),ifc,id_face
+            ierr = ierr + 1
+         endif
+      enddo
+      enddo
+      ierr = iglmax(ierr,1)
+      if (ierr.gt.0) call exitti('error bc$',ierr)
+      
+      ! chk2
+      call my_cbc_chk('bbb')
+      call my_bdid_chk('bbb')
+
+c      ! tag fluid-solid interface for checking flux
+c      if (nelt.gt.nelv) then
+c         call tag_cht_interface(4,5)
+c      endif
+
+      ! rescale to Dpeb=1
+      if (istep.eq.0) call chk_pebble_rad('bbb',4,Rs) ! assume cented at (0,0,0)
+      call cmult(xm1,0.5/Rs,lx1*ly1*lz1*nelt)
+      call cmult(ym1,0.5/Rs,lx1*ly1*lz1*nelt)
+      call cmult(zm1,0.5/Rs,lx1*ly1*lz1*nelt)
+      if (istep.eq.0) call chk_pebble_rad('ccc',4,Rs)
+
+      ! chk3
+      call my_cbc_chk('ccc')
+      call my_bdid_chk('ccc')
+c      call my_dump_bc('ccc')
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat3
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine tag_cht_interface(new_bidf,new_bids)
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+      real tmp(lx1,ly1,lz1,lelt)
+      integer new_bidf,new_bids
+      integer nv,nt,e,f,ix,iy,iz,kx1,kx2,ky1,ky2,kz1,kz2,
+     $        nfacev,nfacet,iglsum
+
+      if (nelv.eq.nelt) return
+      if (lx1.lt.3) call exitti('lx1>=3 is required$',lx1)
+
+      nv = lx1*ly1*lz1*nelv
+      nt = lx1*ly1*lz1*nelt
+      ifield = 2 ! for dssum
+
+      ! From fluid to solid
+      call rzero(tmp,nt)
+      call rone(tmp,nv)
+      call dssum(tmp,lx1,ly1,lz1)
+
+      nfacet = 0
+      do e=nelv+1,nelt
+      do f=1,2*ldim
+         ! index of face center
+         call facind(kx1,kx2,ky1,ky2,kz1,kz2,lx1,ly1,lz1,f)
+         ix = (kx1+kx2)/2
+         iy = (ky1+ky2)/2
+         iz = (kz1+kz2)/2
+
+         if (tmp(ix,iy,iz,e).gt.0.5) then
+            boundaryIDt(f,e) = new_bids
+            nfacet = nfacet + 1
+         endif
+      enddo
+      enddo
+      nfacet = iglsum(nfacet,1)
+
+      ! From solid to fluid
+      call rzero(tmp,nt)
+      do e=nelv+1,nelt
+         call rone(tmp(1,1,1,e),lx1*ly1*lz1)
+      enddo
+      call dssum(tmp,lx1,ly1,lz1)
+
+      nfacev = 0
+      do e=1,nelv
+      do f=1,2*ldim
+         ! index of face center
+         call facind(kx1,kx2,ky1,ky2,kz1,kz2,lx1,ly1,lz1,f)
+         ix = (kx1+kx2)/2
+         iy = (ky1+ky2)/2
+         iz = (kz1+kz2)/2
+
+         if (tmp(ix,iy,iz,e).gt.0.5) then
+            boundaryIDt(f,e) = new_bidf
+            nfacev = nfacev + 1
+         endif
+      enddo
+      enddo
+      nfacev = iglsum(nfacev,1)
+
+      if (nio.eq.0) then
+         write(*,*)'cht #interface:',nfacev,nfacet
+      endif
+      if (nfacev.ne.nfacet) call exitti('nbc mismatched$',1)
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine rte_chkt_flux_cht(bidf,bids,conFluid,conSolid,ifp1)
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+
+      real p_p1_tau, p_p1_bo, p_p1_eps
+      common /rteP1Model_data/ p_p1_tau, p_p1_bo, p_p1_eps
+
+      real conFluid, conSolid
+
+      common /ivrtx/ vertex ((2**ldim)*lelt)
+      integer*8 vertex
+
+      common /my_gs/ igsf
+      integer igsf
+
+      integer icalld, ifp1
+      save icalld
+      data icalld /0/
+
+      integer bidf,bids,nt,nf,kx1,kx2,ky1,ky2,kz1,kz2,ix,iy,iz,ia,e,f
+      character*3 cb3
+
+      real gradG(lx1,ly1,lz1,lelt,3)
+     $   , gradT(lx1,ly1,lz1,lelt,3)
+     $   , flux_f_fac(lx1*lz1,2*ldim,lelt)
+     $   , flux_s_fac(lx1*lz1,2*ldim,lelt)
+     $   , dTdn_fac(lx1*lz1,2*ldim,lelt)
+     $   , unormal(lx1*lz1*2*ldim*lelt,3)
+     $   , ufac1(lx1*lz1*2*ldim*lelt)
+
+      real flux_f, flux_s, area_f, area_s, err(4)
+     $   , glsum, glamax, glmin, glmax
+     $   , rte_p1_coef, jx, jy, jz, jn
+
+      nt = lx1*ly1*lz1*nelt
+      nf = lx1*lz1*(2*ldim)*nelt
+
+      rte_p1_coef = 4.0 / (3.0 * p_p1_tau * p_p1_bo)
+
+      if (icalld.eq.0) then
+         icalld = 1
+         call setup_dg_gs(igsf,lx1,ly1,lz1,nelt,nelgt,vertex)
+
+         ! chk dggs face multiplicity
+         call rone(ufac1,nf)
+         call rzero(ufac1,lx1*lz1*2*ldim*nelv) ! test t-mesh
+         call fgslib_gs_op(igsf,ufac1,1,1,0)
+         err(1) = glmin(ufac1,nf) ! this should be 1
+         err(2) = glmax(ufac1,nf) ! this should be 2
+         if (nio.eq.0) then
+         write(*,*) 'chk_flux dg_gs mt(5k)',err(1),err(2)
+         endif
+
+         ! chk dggs face gs of unormal
+         call copy(unormal(1,1),unx,nf)
+         call copy(unormal(1,2),uny,nf)
+         call copy(unormal(1,3),unz,nf)
+         call fgslib_gs_op(igsf,unormal(1,1),1,1,0)
+         call fgslib_gs_op(igsf,unormal(1,2),1,1,0)
+         call fgslib_gs_op(igsf,unormal(1,3),1,1,0)
+         do ia=1,nf ! filter out boundary faces
+            ufac1(ia) = ufac1(ia)-1.0 ! 1 on internal BC, 0 on bdry
+            ufac1(ia) = max(ufac1(ia),0.0)
+            unormal(ia,1) = unormal(ia,1) * ufac1(ia)
+            unormal(ia,2) = unormal(ia,2) * ufac1(ia)
+            unormal(ia,3) = unormal(ia,3) * ufac1(ia)
+         enddo
+         err(1) = glamax(unormal(1,1),nf)
+         err(2) = glamax(unormal(1,2),nf)
+         err(3) = glamax(unormal(1,3),nf)
+         if (nio.eq.0) then
+         write(*,*) 'chk_flux dg_gs unx(5k)',err(1),err(2),err(3)
+         endif
+
+         if (nio.eq.0) then
+         write(*,*) 'chk_flux fluid vp(5k)',conFluid
+         write(*,*) 'chk_flux solid vp(5k)',conSolid
+         if (ifp1.gt.0) then
+         write(*,*) 'chk_flux solid p1(5k)',p_p1_tau,p_p1_bo,p_p1_eps
+         endif
+
+         write(*,20)'step','time','flux_f','flux_s','area_f','area_s'
+     $             ,'facerr_all','facerr_loc','err_area','err_reso','p1'
+  20     format('rte_cht_flux(5k)',a9,9a12,a3)
+         endif
+      endif
+
+      flux_f = 0.0
+      flux_s = 0.0
+      area_f = 0.0
+      area_s = 0.0
+      call rzero(err,4)
+      call rzero(flux_f_fac,nf)
+      call rzero(flux_s_fac,nf)
+      call rzero(dTdn_fac,nf)
+
+      call gradm1(gradT(1,1,1,1,1),gradT(1,1,1,1,2),gradT(1,1,1,1,3)
+     $           ,t(1,1,1,1,1))
+
+      if (ifp1.gt.0) then
+      call gradm1(gradG(1,1,1,1,1),gradG(1,1,1,1,2),gradG(1,1,1,1,3)
+     $           ,t(1,1,1,1,2))
+      endif
+
+      ! fluid domain
+      do e=1,nelv
+      do f=1,2*ldim
+         if (boundaryIDt(f,e).eq.bidf) then
+            call facind(kx1,kx2,ky1,ky2,kz1,kz2,lx1,ly1,lz1,f)
+            ia = 0
+            do iz = kz1,kz2
+            do iy = ky1,ky2
+            do ix = kx1,kx2
+               ia = ia + 1
+
+               jx = - gradT(ix,iy,iz,e,1) * conFluid
+               jy = - gradT(ix,iy,iz,e,2) * conFluid
+               jz = - gradT(ix,iy,iz,e,3) * conFluid
+               if (ifp1.gt.0) then
+                 jx = jx - gradG(ix,iy,iz,e,1) * rte_p1_coef
+                 jy = jy - gradG(ix,iy,iz,e,2) * rte_p1_coef
+                 jz = jz - gradG(ix,iy,iz,e,3) * rte_p1_coef
+               endif
+
+               jn = jx * unx(ia,1,f,e)
+     $            + jy * uny(ia,1,f,e)
+     $            + jz * unz(ia,1,f,e)
+
+               flux_f_fac(ia,f,e) = flux_f_fac(ia,f,e) + jn
+               flux_f = flux_f + jn * area(ia,1,f,e)
+               area_f = area_f + area(ia,1,f,e)
+            enddo
+            enddo
+            enddo
+         endif
+      enddo
+      enddo
+
+      ! solid domain
+      do e=nelv+1,nelt
+      do f=1,2*ldim
+         if (boundaryIDt(f,e).eq.bids) then
+            call facind(kx1,kx2,ky1,ky2,kz1,kz2,lx1,ly1,lz1,f)
+            ia = 0
+            do iz = kz1,kz2
+            do iy = ky1,ky2
+            do ix = kx1,kx2
+               ia = ia + 1
+
+               jx = - gradT(ix,iy,iz,e,1) * conSolid 
+               jy = - gradT(ix,iy,iz,e,2) * conSolid 
+               jz = - gradT(ix,iy,iz,e,3) * conSolid 
+
+               jn = jx * unx(ia,1,f,e)
+     $            + jy * uny(ia,1,f,e)
+     $            + jz * unz(ia,1,f,e)
+
+               flux_s_fac(ia,f,e) = flux_s_fac(ia,f,e) + jn
+               flux_s = flux_s + jn * area(ia,1,f,e)
+               area_s = area_s + area(ia,1,f,e)
+            enddo
+            enddo
+            enddo
+         endif
+      enddo
+      enddo
+
+      ! all internal BC
+      do e=1,nelt
+      do f=1,2*ldim
+c        if (boundaryIDt(f,e).eq.0) then
+         cb3 = cbc(f,e,2)
+         if (cb3.eq.'E  '.OR.cb3.eq.'   '.OR.
+     $       cb3.eq.'p  '.OR.cb3.eq.'P  ') then ! all internal BC
+         if (boundaryIDt(f,e).ne.bidf.AND.
+     $       boundaryIDt(f,e).ne.bids) then     ! exclude fluid-solid interface
+            call facind(kx1,kx2,ky1,ky2,kz1,kz2,lx1,ly1,lz1,f)
+            ia = 0
+            do iz = kz1,kz2
+            do iy = ky1,ky2
+            do ix = kx1,kx2
+               ia = ia + 1
+               dTdn_fac(ia,f,e) = gradT(ix,iy,iz,e,1) * unx(ia,1,f,e)
+     &                          + gradT(ix,iy,iz,e,2) * uny(ia,1,f,e)
+     &                          + gradT(ix,iy,iz,e,3) * unz(ia,1,f,e)
+            enddo
+            enddo
+            enddo
+         endif
+         endif
+      enddo
+      enddo
+
+      ! fluid-solid interface
+      ! total surface flux 
+      flux_f = glsum(flux_f,1)
+      flux_s = glsum(flux_s,1)
+      err(1) = abs(flux_s + flux_f)
+  
+      ! pointwise flux
+      call add2(flux_f_fac,flux_s_fac,nf)
+      call fgslib_gs_op(igsf,flux_f_fac,1,1,0)
+      err(2) = glamax(flux_f_fac,nf)
+
+      ! area chk
+      area_f = glsum(area_f,1)
+      area_s = glsum(area_s,1)
+      err(3) = abs(area_f - area_s)
+
+      ! all internal BC
+      ! resolution chk
+      call fgslib_gs_op(igsf,dTdn_fac,1,1,0)
+      err(4) = glamax(dTdn_fac,nf)
+
+      if (nio.eq.0) write(*,21)istep,time,flux_f,flux_s,area_f,area_s
+     $                        ,err(1),err(2),err(3),err(4),ifp1
+
+c      ifxyo = .true.
+c      call outpost2(vx,vy,vz,pr,gradT,3,'ttt')
+  21  format('rte_cht_flux(5k)',i9,1p9e12.4,i3)
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine compute_nusselt(bid,nu)
+      implicit none
+c     integrated flux
+      include 'SIZE'   
+      include 'TOTAL'  
+
+      real nu, a, q, qq, glsum
+      real tx(lx1,ly1,lz1,lelt)
+     $   , ty(lx1,ly1,lz1,lelt)
+     $   , tz(lx1,ly1,lz1,lelt)
+
+      integer e, f, bid
+     $      , kx1,kx2,ky1,ky2,kz1,kz2,ix,iy,iz,ia
+    
+      call gradm1(tx,ty,tz,t)
+      
+      q = 0.0
+      a = 0.0
+      do e=1,nelt
+      do f=1,2*ldim
+         if (boundaryIDt(f,e).eq.bid) then
+            call facind(kx1,kx2,ky1,ky2,kz1,kz2,lx1,ly1,lz1,f)
+            ia = 0
+            do iz = kz1,kz2
+            do iy = ky1,ky2
+            do ix = kx1,kx2
+               ia = ia + 1
+               qq = tx(ix,iy,iz,e) * unx(ia,1,f,e)
+     $            + ty(ix,iy,iz,e) * uny(ia,1,f,e)
+     $            + tz(ix,iy,iz,e) * unz(ia,1,f,e)
+
+               q = q + qq * area(ia,1,f,e)
+               a = a + area(ia,1,f,e)
+            enddo
+            enddo
+            enddo
+         endif
+      enddo
+      enddo
+      q = glsum(q,1)
+      a = glsum(a,1)
+      nu = q / a
+      if (nio.eq.0) write(6,1) istep,time,q,a,nu,bid
+    1 format(i9,1p4e12.4,' nusselt(5k) bid= ',i2)
+
+      return
+      end
+c-----------------------------------------------------------------------

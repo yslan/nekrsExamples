@@ -1,0 +1,243 @@
+// P1 model, rhs = T^4
+@kernel void G_rhs(const dlong Ntotal,
+                   @restrict const dfloat* T,
+                   @restrict dfloat* RHS)
+{ 
+  for (dlong n = 0; n < Ntotal; ++n; @tile(p_blockSize, @outer, @inner)) {
+    if (n<Ntotal) {
+      const dfloat t = T[n];
+      RHS[n] = t*t*t*t;
+    }
+  }
+}
+
+// P1 model, heat source = - 4 * coef * (T^4-G)
+@kernel void T_rhs(const dlong Ntotal,
+                   @restrict const dfloat* T,
+                   @restrict const dfloat* G,
+                   @restrict dfloat* RHS)
+{ 
+  for (dlong n = 0; n < Ntotal; ++n; @tile(p_blockSize, @outer, @inner)) {
+    if (n<Ntotal) {
+      const dfloat t = T[n];
+      const dfloat g = G[n];
+      const dfloat t4 = t*t*t*t;
+      const dfloat r = (4.0*P_RTE_TAU/P_RTE_BO) * (g - t4);
+      RHS[n] = r;
+    }
+  }
+}
+
+
+#define surfaceTerms(sk, face, i, j)                                                                         \
+{                                                                                                            \
+const dlong idM = vmapM[sk];                                                                                 \
+const dfloat nx = sgeo[sk * p_Nsgeo + p_NXID];                                                               \
+const dfloat ny = sgeo[sk * p_Nsgeo + p_NYID];                                                               \
+const dfloat nz = sgeo[sk * p_Nsgeo + p_NZID];                                                               \
+const dfloat dTdx = gradT[idM + 0 * offset];                                                                 \
+const dfloat dTdy = gradT[idM + 1 * offset];                                                                 \
+const dfloat dTdz = gradT[idM + 2 * offset];                                                                 \
+const dfloat dGdx = gradG[idM + 0 * offset];                                                                 \
+const dfloat dGdy = gradG[idM + 1 * offset];                                                                 \
+const dfloat dGdz = gradG[idM + 2 * offset];                                                                 \
+const dfloat dTdn = dTdx*nx + dTdy*ny + dTdz*nz;                                                             \
+const dfloat dGdn = dGdx*nx + dGdy*ny + dGdz*nz;                                                             \
+if (solid) {                                                                                                 \
+s_ndU[j][i] = alpha_s * dTdn;                                                                                \
+}                                                                                                            \
+else {                                                                                                       \
+s_ndU[j][i] = alpha_f * dTdn + beta_f * dGdn;                                                                \
+}                                                                                                            \
+}                                                                                                            \
+
+// Jdotn[n] = a*dTdn[n] + b*dGdn
+@kernel void compFluxCht(const dlong Nelements,
+                         const dlong offset,
+                         const int nbID,
+                         @ restrict const int *bID,
+                         @ restrict const dfloat *sgeo,
+                         @ restrict const dlong *vmapM,
+                         @ restrict const int *EToBM,
+                         @restrict const dlong * eInfo,
+                         const dfloat alpha_f,
+                         const dfloat alpha_s,
+                         @ restrict const dfloat *gradT,
+                         const dfloat beta_f,
+                         @ restrict const dfloat *gradG,
+                         @ restrict dfloat *Jdotn)
+{
+  for (dlong e = 0; e < Nelements; e++; @outer(0)) {
+    const dlong solid = eInfo[e];
+    @shared dfloat s_ndU[p_Nq][p_Nq];
+    @exclusive dfloat r_sum[p_Nq];
+
+    for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+      for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+#pragma unroll p_Nq
+        for (int k = 0; k < p_Nq; ++k) r_sum[k] = 0.;
+      }
+    }
+
+    // loop over all request boundary patches
+    for (int ibID = 0; ibID < nbID; ibID++) {
+
+    // face 0
+    if (bID[ibID] == EToBM[0 + p_Nfaces * e]) {
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          const dlong sk0 = e * p_Nfp * p_Nfaces + 0 * p_Nfp + i + j * p_Nq;
+          surfaceTerms(sk0, 0, i, j);
+        }
+      }
+      @barrier();
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          r_sum[0] += s_ndU[j][i];
+        }
+      }
+    }
+
+    @barrier();
+
+    // face 5
+    if (bID[ibID] == EToBM[5 + p_Nfaces * e]) {
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) { 
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          const dlong sk5 = e * p_Nfp * p_Nfaces + 5 * p_Nfp + i + j * p_Nq;
+          surfaceTerms(sk5, 5, i, j);
+        }
+      }
+      @barrier();
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) { 
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          r_sum[p_Nq - 1] += s_ndU[j][i];
+        }
+      }
+    }
+
+    @barrier();
+
+    // face 1
+    if (bID[ibID] == EToBM[1 + p_Nfaces * e]) {
+      for (int k = 0; k < p_Nq; ++k; @inner(1))
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          const dlong sk1 = e * p_Nfp * p_Nfaces + 1 * p_Nfp + i + k * p_Nq;
+          surfaceTerms(sk1, 1, i, k);
+        }
+      @barrier();
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          if (j == 0) { // face 1
+#pragma unroll p_Nq
+            for (int k = 0; k < p_Nq; k++) r_sum[k] += s_ndU[k][i];
+          }
+        }
+      }
+    }
+
+    @barrier();
+
+    // face 3 
+    if (bID[ibID] == EToBM[3 + p_Nfaces * e]) {
+      for (int k = 0; k < p_Nq; ++k; @inner(1))
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          const dlong sk3 = e * p_Nfp * p_Nfaces + 3 * p_Nfp + i + k * p_Nq;
+          surfaceTerms(sk3, 3, i, k);
+        }
+      @barrier();
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          if (j == p_Nq - 1) { // face 3
+#pragma unroll p_Nq
+            for (int k = 0; k < p_Nq; k++) r_sum[k] += s_ndU[k][i];
+          }
+        }
+      }
+    }
+
+    @barrier();
+
+    // face 2
+    if (bID[ibID] == EToBM[2 + p_Nfaces * e]) {
+      for (int k = 0; k < p_Nq; ++k; @inner(1))
+        for (int j = 0; j < p_Nq; ++j; @inner(0)) {
+          const dlong sk2 = e * p_Nfp * p_Nfaces + 2 * p_Nfp + j + k * p_Nq;
+          surfaceTerms(sk2, 2, j, k);
+        }
+      @barrier();
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          if (i == p_Nq - 1) { // face 2
+#pragma unroll p_Nq
+            for (int k = 0; k < p_Nq; k++) r_sum[k] += s_ndU[k][j];
+          }
+        }
+      }
+    }
+
+    @barrier();
+
+    // face 4
+    if (bID[ibID] == EToBM[4 + p_Nfaces * e]) {
+      for (int k = 0; k < p_Nq; ++k; @inner(1))
+        for (int j = 0; j < p_Nq; ++j; @inner(0)) {
+          const dlong sk4 = e * p_Nfp * p_Nfaces + 4 * p_Nfp + j + k * p_Nq;
+          surfaceTerms(sk4, 4, j, k);
+        }
+      @barrier();
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          if (i == 0) { // face 4
+#pragma unroll p_Nq
+            for (int k = 0; k < p_Nq; k++)  r_sum[k] += s_ndU[k][j];
+          }
+        }
+      }
+    }
+
+    @barrier();
+
+    } // boundary patch loop loop 
+
+    for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+      for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+#pragma unroll p_Nq
+        for (int k = 0; k < p_Nq; ++k) {
+          const dlong id = e * p_Np + k * p_Nq * p_Nq + j * p_Nq + i;
+          Jdotn[id] = r_sum[k];
+        }
+      }
+    }
+  }
+}
+#undef surfaceTerms
+
+@kernel void opAdd3cht(const dlong Nelements,
+                       const dlong offset,
+                       @restrict const dlong * eInfo,
+                       const dfloat alpha_f,
+                       const dfloat alpha_s,
+                       @ restrict const dfloat *U,
+                       const dfloat beta_f,
+                       const dfloat beta_s,
+                       @ restrict const dfloat *V,
+                       @ restrict dfloat *W)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    const dlong solid = eInfo[e];
+    for (int n = 0; n < p_Np; ++n; @inner(0)) {
+      const int id = e*p_Np + n;
+      if (solid) {
+        W[id + 0*offset] = alpha_s * U[id + 0*offset] + beta_s * V[id + 0*offset];
+        W[id + 1*offset] = alpha_s * U[id + 1*offset] + beta_s * V[id + 1*offset];
+        W[id + 2*offset] = alpha_s * U[id + 2*offset] + beta_s * V[id + 2*offset];
+      } else {
+        W[id + 0*offset] = alpha_f * U[id + 0*offset] + beta_f * V[id + 0*offset];
+        W[id + 1*offset] = alpha_f * U[id + 1*offset] + beta_f * V[id + 1*offset];
+        W[id + 2*offset] = alpha_f * U[id + 2*offset] + beta_f * V[id + 2*offset];
+      }
+    }                       
+  }
+}
+
