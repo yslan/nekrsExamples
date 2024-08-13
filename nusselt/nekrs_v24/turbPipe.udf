@@ -13,45 +13,46 @@ static dfloat ZLENGTH;
 #endif
 
 // nusselt
-dfloat surface_area = 0.0;
-int isCalled = 0;
+dfloat nusseltArea = 0.0;
+occa::memory o_invJw;
+int nusseltCalled = false;
 
-double compute_nusselt(std::vector<int> bIDList, occa::memory o_Temp,
-                       const double time, const int tstep) {
-
-  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
-  auto cds = nrs->cds;
-  auto meshT = cds->mesh[0];
-  auto fieldOffset = cds->fieldOffset[0];
+dfloat compute_nusselt(mesh_t *mesh, const int fieldOffset, std::vector<int> bIDList,
+                       occa::memory o_Temp, const double time, const int tstep) {
 
   auto nbid = bIDList.size();
   if (nbid == 0) return 0.0;
   auto o_bid = platform->o_memPool.reserve<int>(nbid);
   o_bid.copyFrom(bIDList.data(), nbid);
 
-  // dTdn
-  auto o_gradT = opSEM::strongGrad(meshT, fieldOffset, o_Temp); // weak grad
-  oogs::startFinish(o_gradT, 3, fieldOffset, ogsDfloat, ogsAdd, meshT->oogs);
-  platform->linAlg->axmyMany(meshT->Nlocal, 3, fieldOffset, 0, 1.0, meshT->o_invLMM, o_gradT);
+  if (!nusseltCalled) {
+    o_invJw = platform->device.malloc<dfloat>(fieldOffset);
+    o_invJw.copyFrom(mesh->o_LMM, mesh->Nlocal);
+    platform->linAlg->ady(mesh->Nlocal, 1.0, o_invJw);
 
-  auto flux = meshT->surfaceAreaNormalMultiplyIntegrate(
-                                      fieldOffset,
-                                      nbid, 
-                                      o_bid, 
-                                      o_gradT).at(0);
-
-  if (isCalled==0) {
+    // surface area
     auto o_one = platform->o_memPool.reserve<dfloat>(fieldOffset);
-    platform->linAlg->fill(meshT->Nlocal, 1.0, o_one);
-    auto area = meshT->surfaceAreaMultiplyIntegrate(nbid, o_bid, o_one).at(0);
-    surface_area = area;
-    isCalled = 1;
+    platform->linAlg->fill(mesh->Nlocal, 1.0, o_one);
+    nusseltArea = mesh->surfaceAreaMultiplyIntegrate(nbid, o_bid, o_one).at(0);
+    nusseltCalled = true;
   }
 
-  double nu = flux / surface_area;
+  // dTdn
+  auto o_grad = platform->o_memPool.reserve<dfloat>(3*fieldOffset);
+  opSEM::strongGrad(mesh, fieldOffset, o_Temp, o_grad); // issues/1407
+  platform->linAlg->axmyMany(mesh->Nlocal, 3, fieldOffset, 0, 1.0, o_invJw, o_grad);
+
+  auto flux = mesh->surfaceAreaNormalMultiplyIntegrate(
+                                      fieldOffset,
+                                      nbid,
+                                      o_bid,
+                                      o_grad).at(0);
+
+  dfloat nu = flux / nusseltArea;
   if (platform->comm.mpiRank == 0) {
-    printf("%9d %11.4e %11.4e %11.4e %11.4e nusselt(rs)\n", tstep, time, flux, surface_area, nu);
-  } 
+    printf("%9d %11.4e %11.4e %11.4e %11.4e nusselt(rs)\n", tstep, time, flux, nusseltArea, nu);
+  }
+
   return nu;
 }
 
@@ -79,10 +80,11 @@ void UDF_Setup()
 
 void UDF_ExecuteStep(double time, int tstep)
 {
+  auto cds = nrs->cds;
   velRecycling::copy();
 
   std::vector<int> bidWall = {3};
-  auto nu = compute_nusselt(bidWall, nrs->cds->o_S, time, tstep);
+  auto nu = compute_nusselt(cds->mesh[0], cds->fieldOffset[0], bidWall, cds->o_S, time, tstep);
 
 //  if (nrs->isOutputStep) {
   if (tstep % 10 == 0) {

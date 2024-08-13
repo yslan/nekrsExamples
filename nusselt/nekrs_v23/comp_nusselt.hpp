@@ -19,6 +19,7 @@ static int Nblock;
 static occa::kernel getBCFluxKernel;
 static occa::kernel sumReductionKernel;
 
+static occa::memory o_invJw;
 static occa::memory o_grad;
 static occa::memory o_gradX, o_gradY, o_gradZ;
 
@@ -53,6 +54,7 @@ void nusselt::setup(mesh_t* mesh_in, const dlong fieldOffset_in)
   const dlong NfpTotal = mesh->Nelements * mesh->Nfaces * mesh->Nfp;
  
   // volume
+  o_invJw = platform->device.malloc(fieldOffset * sizeof(dfloat));
   o_grad = platform->device.malloc(3 * fieldOffset * sizeof(dfloat));
   o_gradX = o_grad + 0 * fieldOffset * sizeof(dfloat);
   o_gradY = o_grad + 1 * fieldOffset * sizeof(dfloat);
@@ -68,6 +70,9 @@ void nusselt::setup(mesh_t* mesh_in, const dlong fieldOffset_in)
   sum2 = (dfloat *)calloc(Nblock, sizeof(dfloat));
   o_sum1 = platform->device.malloc(Nblock * sizeof(dfloat));
   o_sum2 = platform->device.malloc(Nblock * sizeof(dfloat));
+
+  o_invJw.copyFrom(mesh->o_LMM, mesh->Nlocal * sizeof(dfloat));
+  platform->linAlg->ady(mesh->Nlocal, 1.0, o_invJw);
 }
 
 dfloat nusselt::compute(nrs_t* nrs, std::vector<int> bIDList, occa::memory o_temperature, const dfloat time, const int tstep, bool print)
@@ -87,11 +92,9 @@ dfloat nusselt::compute(nrs_t* nrs, std::vector<int> bIDList, occa::memory o_tem
                               o_temperature,
                               o_grad);
 
-    oogs::startFinish(o_grad, 3, fieldOffset, ogsDfloat, ogsAdd, nrs->gsh);
-
-    platform->linAlg->axmy(mesh->Nlocal, 1.0, mesh->o_invLMM, o_gradX); // y[i] = alpha*x[i]*y[i]
-    platform->linAlg->axmy(mesh->Nlocal, 1.0, mesh->o_invLMM, o_gradY);
-    platform->linAlg->axmy(mesh->Nlocal, 1.0, mesh->o_invLMM, o_gradZ);
+    platform->linAlg->axmy(mesh->Nlocal, 1.0, o_invJw, o_gradX);
+    platform->linAlg->axmy(mesh->Nlocal, 1.0, o_invJw, o_gradY);
+    platform->linAlg->axmy(mesh->Nlocal, 1.0, o_invJw, o_gradZ);
   
     getBCFluxKernel(mesh->Nelements,
                     bid,
