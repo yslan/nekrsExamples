@@ -17,46 +17,6 @@ static dfloat rho, mue, rhoCpFluid, rhoCpSolid, conFluid, conSolid;
 // P1, for checking only
 std::vector<int> TbidInterfaceFluid, TbidInterfaceSolid;
 
-// nusselt
-dfloat nusseltAarea = 0.0;
-int nusseltCalled = false;
-
-dfloat compute_nusselt(mesh_t *mesh, const int fieldOffset, std::vector<int> bIDList,
-                       occa::memory o_Temp, const double time, const int tstep) {
-// FIXME, this prints wrong results?
-
-  auto nbid = bIDList.size();
-  if (nbid == 0) return 0.0;
-  auto o_bid = platform->o_memPool.reserve<int>(nbid);
-  o_bid.copyFrom(bIDList.data(), nbid);
-
-  // dTdn
-  auto o_grad = platform->o_memPool.reserve<dfloat>(3*fieldOffset);
-  opSEM::strongGrad(mesh, fieldOffset, o_Temp, o_grad);
-  oogs::startFinish(o_grad, 3, fieldOffset, ogsDfloat, ogsAdd, mesh->oogs);
-  platform->linAlg->axmyMany(mesh->Nlocal, 3, fieldOffset, 0, 1.0, mesh->o_invLMM, o_grad);
-
-  auto flux = meshT->surfaceAreaNormalMultiplyIntegrate(
-                                      fieldOffset,
-                                      nbid,
-                                      o_bid,
-                                      o_grad).at(0);
-
-  if (!nusseltCalled) {
-    auto o_one = platform->o_memPool.reserve<dfloat>(fieldOffset);
-    platform->linAlg->fill(mesh->Nlocal, 1.0, o_one);
-    nusseltAarea = mesh->surfaceAreaMultiplyIntegrate(nbid, o_bid, o_one).at(0);
-    nusseltCalled = true;
-  }
-
-  dfloat nu = flux / nusseltAarea;
-  if (platform->comm.mpiRank == 0) {
-    printf("%9d %11.4e %11.4e %11.4e %11.4e nusselt(rs)\n", tstep, time, flux, nusseltAarea, nu);
-  }
-
-  return nu;
-}
-
 occa::memory userScalarImplicitTerm(double time, int scalarIdx)
 {
   return rteP1Model::o_implicitRobinLHS_g(scalarIdx);
@@ -81,7 +41,7 @@ void uservp(double time)
   auto cds = nrs->cds;
   auto meshV = nrs->meshV;
   auto meshT = cds->mesh[0];
-  
+
   if(updateProperties) {
     if(platform->comm.mpiRank == 0) {
       printf("updating properties, time= %g, rho=%g, mue=%g",time,rho,mue);
@@ -94,7 +54,7 @@ void uservp(double time)
     const auto o_rho = nrs->o_prop.slice(1 * nrs->fieldOffset);
     cFill(meshV->Nelements, mue, 0, meshV->o_elementInfo, o_mue);
     cFill(meshV->Nelements, rho, 0, meshV->o_elementInfo, o_rho);
-    
+
     // temperature
     const auto o_rhoCp = cds->o_rho + cds->fieldOffsetScan[0];
     const auto o_con = cds->o_diff + cds->fieldOffsetScan[0];
@@ -126,7 +86,7 @@ void UDF_Setup0(MPI_Comm comm, setupAide &options)
                      p1_twrkid, p1_gwrkid,   // usrwrk id
                      p1_tau, p1_bo, p1_eps); // constants
 #endif
-  rteP1Model::sendParamToNek(); // send rte's param to usr, for checking only
+  rteP1Model::sendParamToNek(); // send param to usr, for checking only
 
   // send to Nek5000
   if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
@@ -176,7 +136,6 @@ void UDF_ExecuteStep(double time, int tstep)
   }
 */
 
-
   if (tstep % 100 == 0 || nrs->isCheckpointStep) {
     // Print min/max
     auto printMinMax = [&](std::string tag, const occa::memory& o_u)
@@ -195,23 +154,14 @@ void UDF_ExecuteStep(double time, int tstep)
     printMinMax("T", cds->o_S.slice(cds->fieldOffsetScan[0], cds->mesh[0]->Nlocal));
     printMinMax("G", cds->o_S.slice(cds->fieldOffsetScan[1], meshV->Nlocal));
 
-    // Check flux, FIXME, a bug in this chk function
-    //rteP1Model::checkCHTFlux(nrs, time, tstep, conFluid, conSolid,
-    //                         TbidInterfaceFluid, TbidInterfaceSolid);
-
-    // FIXME, the results are not correct...
-    auto nu = compute_nusselt(meshT, cds->fieldOffset[0],
-                              TbidInterfaceFluid, cds->o_S, time, tstep);
-
-    // Check flux in usr, cross reference
-    nek::ocopyToNek(time, tstep);
-    nek::userchk();
+    // Check flux + compute nusselt number
+    rteP1Model::checkCHTFlux(nrs, time, tstep, conFluid, conSolid,
+                             TbidInterfaceFluid, TbidInterfaceSolid);
   }
    
-/*
+  // Check flux in usr, cross reference
   if (nrs->isCheckpointStep) {
     nek::ocopyToNek(time, tstep);
     nek::userchk(); 
   }
-*/
 }

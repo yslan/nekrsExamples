@@ -212,32 +212,3 @@ s_ndU[j][i] = alpha_f * dTdn + beta_f * dGdn;                                   
   }
 }
 #undef surfaceTerms
-
-@kernel void opAdd3cht(const dlong Nelements,
-                       const dlong offset,
-                       @restrict const dlong * eInfo,
-                       const dfloat alpha_f,
-                       const dfloat alpha_s,
-                       @ restrict const dfloat *U,
-                       const dfloat beta_f,
-                       const dfloat beta_s,
-                       @ restrict const dfloat *V,
-                       @ restrict dfloat *W)
-{
-  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
-    const dlong solid = eInfo[e];
-    for (int n = 0; n < p_Np; ++n; @inner(0)) {
-      const int id = e*p_Np + n;
-      if (solid) {
-        W[id + 0*offset] = alpha_s * U[id + 0*offset] + beta_s * V[id + 0*offset];
-        W[id + 1*offset] = alpha_s * U[id + 1*offset] + beta_s * V[id + 1*offset];
-        W[id + 2*offset] = alpha_s * U[id + 2*offset] + beta_s * V[id + 2*offset];
-      } else {
-        W[id + 0*offset] = alpha_f * U[id + 0*offset] + beta_f * V[id + 0*offset];
-        W[id + 1*offset] = alpha_f * U[id + 1*offset] + beta_f * V[id + 1*offset];
-        W[id + 2*offset] = alpha_f * U[id + 2*offset] + beta_f * V[id + 2*offset];
-      }
-    }                       
-  }
-}
-

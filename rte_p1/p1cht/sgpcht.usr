@@ -14,9 +14,7 @@ c-----------------------------------------------------------------------
       ! cht_bid_f, cht_bid_s, con_f, con_s, yes-P1
       call rte_chkt_flux_cht(4,5,p_conFluid,p_conSolid,1)
 
-      ! nbid, bidList, nu(out)
       call compute_nusselt(4, nu)
-      call compute_nusselt_v0(4, nu)
 
       return
       end
@@ -252,12 +250,9 @@ c-----------------------------------------------------------------------
      $   , flux_f_fac(lx1*lz1,2*ldim,lelt)
      $   , flux_s_fac(lx1*lz1,2*ldim,lelt)
      $   , dTdn_fac(lx1*lz1,2*ldim,lelt)
-     $   , unormal(lx1*lz1*2*ldim*lelt,3)
-     $   , ufac1(lx1*lz1*2*ldim*lelt)
 
       real flux_f, flux_s, area_f, area_s, err(4)
-     $   , glsum, glamax, glmin, glmax
-     $   , rte_p1_coef, jx, jy, jz, jn
+     $   , glsum, glamax, rte_p1_coef, jx, jy, jz, jn
 
       nt = lx1*ly1*lz1*nelt
       nf = lx1*lz1*(2*ldim)*nelt
@@ -268,44 +263,7 @@ c-----------------------------------------------------------------------
          icalld = 1
          call setup_dg_gs(igsf,lx1,ly1,lz1,nelt,nelgt,vertex)
 
-         ! chk dggs face multiplicity
-         call rone(ufac1,nf)
-         call rzero(ufac1,lx1*lz1*2*ldim*nelv) ! test t-mesh
-         call fgslib_gs_op(igsf,ufac1,1,1,0)
-         err(1) = glmin(ufac1,nf) ! this should be 1
-         err(2) = glmax(ufac1,nf) ! this should be 2
-         if (nio.eq.0) then
-         write(*,*) 'chk_flux dg_gs mt(5k)',err(1),err(2)
-         endif
-
-         ! chk dggs face gs of unormal
-         call copy(unormal(1,1),unx,nf)
-         call copy(unormal(1,2),uny,nf)
-         call copy(unormal(1,3),unz,nf)
-         call fgslib_gs_op(igsf,unormal(1,1),1,1,0)
-         call fgslib_gs_op(igsf,unormal(1,2),1,1,0)
-         call fgslib_gs_op(igsf,unormal(1,3),1,1,0)
-         do ia=1,nf ! filter out boundary faces
-            ufac1(ia) = ufac1(ia)-1.0 ! 1 on internal BC, 0 on bdry
-            ufac1(ia) = max(ufac1(ia),0.0)
-            unormal(ia,1) = unormal(ia,1) * ufac1(ia)
-            unormal(ia,2) = unormal(ia,2) * ufac1(ia)
-            unormal(ia,3) = unormal(ia,3) * ufac1(ia)
-         enddo
-         err(1) = glamax(unormal(1,1),nf)
-         err(2) = glamax(unormal(1,2),nf)
-         err(3) = glamax(unormal(1,3),nf)
-         if (nio.eq.0) then
-         write(*,*) 'chk_flux dg_gs unx(5k)',err(1),err(2),err(3)
-         endif
-
-         if (nio.eq.0) then
-         write(*,*) 'chk_flux fluid vp(5k)',conFluid
-         write(*,*) 'chk_flux solid vp(5k)',conSolid
-         if (ifp1.gt.0) then
-         write(*,*) 'chk_flux solid p1(5k)',p_p1_tau,p_p1_bo,p_p1_eps
-         endif
-
+         if (nio.eq.0) then ! header
          write(*,20)'step','time','flux_f','flux_s','area_f','area_s'
      $             ,'facerr_all','facerr_loc','err_area','err_reso','p1'
   20     format('rte_cht_flux(5k)',a9,9a12,a3)
@@ -492,130 +450,6 @@ c     integrated flux
       nu = q / a
       if (nio.eq.0) write(6,1) istep,time,q,a,nu,bid
     1 format(i9,1p4e12.4,' nusselt(5k) bid= ',i2)
-
-      return
-      end
-c-----------------------------------------------------------------------
-
-
-      subroutine compute_nusselt_v0(bid,nu)
-
-c     integrated flux
-      
-      include 'SIZE'
-      include 'TOTAL'
-      
-      real nu,a(2),q(2)
-      
-      parameter (lt=lx1*ly1*lz1*lelt)
-      common /scruz/ tx(lt),ty(lt),tz(lt),work(lx1*ly1*lz1)
-      
-      integer e,f,eg,bid
-      
-      if (istep.eq.0) call set_obj(bid)  ! define objects for surface integrals
-      
-      call gradm1(tx,ty,tz,t)
-      
-      call rzero(a,2)
-      call rzero(q,2)
-      
-      do iobj=1,nobj
-         do mem=1,nmember(iobj)
-            eg=object(iobj,mem,1)
-            f =object(iobj,mem,2)
-            e =gllel(eg)
-            call surface_flux_area_local(dq,aq,tx,ty,tz,e,f,work)
-            a(iobj) = a(iobj) + aq
-            q(iobj) = q(iobj) + dq
-         enddo
-      enddo
-      call gop(a,work,'+  ',2)
-      call gop(q,work,'+  ',2)
-      nu = q(1)/a(1)
-      if (nio.eq.0) write(6,1) istep,time,q(1),a(1),nu,bid
-    1 format(i9,1p4e12.4,' nusselt(00) bid= ',i2)
-      
-      return
-      end
-      subroutine surface_flux_area_local(dq,aq,qx,qy,qz,e,f,w)
-c
-c     Here, we create a copy of the V19 subroutine surface_flux_area, 
-c     just to ensure compatability with both V19 and V17.
-c
-      include 'SIZE'
-      include 'GEOM'
-      include 'INPUT'
-      include 'PARALLEL'
-      include 'TOPOL'
-      parameter (l=lx1*ly1*lz1)
-      real qx(l,1),qy(l,1),qz(l,1),w(lx1,ly1,lz1)
-      integer e,f
-      call           faccl3  (w,qx(1,e),unx(1,1,f,e),f)
-      call           faddcl3 (w,qy(1,e),uny(1,1,f,e),f)
-      if (if3d) call faddcl3 (w,qz(1,e),unz(1,1,f,e),f)
-      call dsset(lx1,ly1,lz1)
-      iface  = eface1(f)
-      js1    = skpdat(1,iface)
-      jf1    = skpdat(2,iface)
-      jskip1 = skpdat(3,iface)
-      js2    = skpdat(4,iface)
-      jf2    = skpdat(5,iface)
-      jskip2 = skpdat(6,iface)
-      dq = 0
-      aq = 0
-      i  = 0
-      do 100 j2=js2,jf2,jskip2
-      do 100 j1=js1,jf1,jskip1
-         i = i+1
-         dq    = dq + area(i,1,f,e)*w(j1,j2,1)
-         aq    = aq + area(i,1,f,e)
-  100 continue
-      return
-      end
-c-----------------------------------------------------------------------
-      subroutine set_obj(bid)  ! define objects for surface integrals
-c
-      include 'SIZE'
-      include 'TOTAL'
-
-c      character*3 cb3
-      integer e,f,eg,bid
-
-      nobj = 1  ! 2 Objects:  End Faces; Cylinder Surface
-      iobj = 0
-
-      if (maxobj.lt.nobj) call exitti('increase maxobj in SIZE$',nobj)
-
-      nxyz  = lx1*ly1*lz1
-      nface = 2*ldim
-
-      if (nelv.eq.nelt) then
-         do e=1,nelv
-         do f=1,nface
-            if (boundaryID(f,e).eq.bid) then
-                iobj = 1
-                nmember(iobj) = nmember(iobj) + 1
-                mem = nmember(iobj)
-                eg  = lglel(e)
-                object(iobj,mem,1) = eg
-                object(iobj,mem,2) = f
-            endif
-         enddo
-         enddo
-      else
-         do e=1,nelt
-         do f=1,nface
-            if (boundaryIDt(f,e).eq.bid) then
-               iobj = 1
-               nmember(iobj) = nmember(iobj) + 1
-               mem = nmember(iobj)
-               eg  = lglel(e)
-               object(iobj,mem,1) = eg
-               object(iobj,mem,2) = f
-            endif
-         enddo
-         enddo
-      endif
 
       return
       end

@@ -241,12 +241,9 @@ c-----------------------------------------------------------------------
      $   , flux_f_fac(lx1*lz1,2*ldim,lelt)
      $   , flux_s_fac(lx1*lz1,2*ldim,lelt)
      $   , dTdn_fac(lx1*lz1,2*ldim,lelt)
-     $   , unormal(lx1*lz1*2*ldim*lelt,3)
-     $   , ufac1(lx1*lz1*2*ldim*lelt)
 
       real flux_f, flux_s, area_f, area_s, err(4)
-     $   , glsum, glamax, glmin, glmax
-     $   , rte_p1_coef, jx, jy, jz, jn
+     $   , glsum, glamax, rte_p1_coef, jx, jy, jz, jn
 
       nt = lx1*ly1*lz1*nelt
       nf = lx1*lz1*(2*ldim)*nelt
@@ -257,44 +254,7 @@ c-----------------------------------------------------------------------
          icalld = 1
          call setup_dg_gs(igsf,lx1,ly1,lz1,nelt,nelgt,vertex)
 
-         ! chk dggs face multiplicity
-         call rone(ufac1,nf)
-         call rzero(ufac1,lx1*lz1*2*ldim*nelv) ! test t-mesh
-         call fgslib_gs_op(igsf,ufac1,1,1,0)
-         err(1) = glmin(ufac1,nf) ! this should be 1
-         err(2) = glmax(ufac1,nf) ! this should be 2
-         if (nio.eq.0) then
-         write(*,*) 'chk_flux dg_gs mt(5k)',err(1),err(2)
-         endif
-
-         ! chk dggs face gs of unormal
-         call copy(unormal(1,1),unx,nf)
-         call copy(unormal(1,2),uny,nf)
-         call copy(unormal(1,3),unz,nf)
-         call fgslib_gs_op(igsf,unormal(1,1),1,1,0)
-         call fgslib_gs_op(igsf,unormal(1,2),1,1,0)
-         call fgslib_gs_op(igsf,unormal(1,3),1,1,0)
-         do ia=1,nf ! filter out boundary faces
-            ufac1(ia) = ufac1(ia)-1.0 ! 1 on internal BC, 0 on bdry
-            ufac1(ia) = max(ufac1(ia),0.0)
-            unormal(ia,1) = unormal(ia,1) * ufac1(ia)
-            unormal(ia,2) = unormal(ia,2) * ufac1(ia)
-            unormal(ia,3) = unormal(ia,3) * ufac1(ia)
-         enddo
-         err(1) = glamax(unormal(1,1),nf)
-         err(2) = glamax(unormal(1,2),nf)
-         err(3) = glamax(unormal(1,3),nf)
-         if (nio.eq.0) then
-         write(*,*) 'chk_flux dg_gs unx(5k)',err(1),err(2),err(3)
-         endif
-
-         if (nio.eq.0) then
-         write(*,*) 'chk_flux fluid vp(5k)',conFluid
-         write(*,*) 'chk_flux solid vp(5k)',conSolid
-         if (ifp1.gt.0) then
-         write(*,*) 'chk_flux solid p1(5k)',p_p1_tau,p_p1_bo,p_p1_eps
-         endif
-
+         if (nio.eq.0) then ! header
          write(*,20)'step','time','flux_f','flux_s','area_f','area_s'
      $             ,'facerr_all','facerr_loc','err_area','err_reso','p1'
   20     format('rte_cht_flux(5k)',a9,9a12,a3)
