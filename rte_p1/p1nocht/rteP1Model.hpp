@@ -45,13 +45,13 @@ std::vector<int> GbidRobin; // boundary id for G's Robin BC
 static occa::memory o_GRobinLHS;
 static occa::memory o_Glambda0;
 static occa::memory o_Glambda1;
-static occa::memory o_Glag;   // TODO: prepare for extrapolation
+//static occa::memory o_Glag;   // TODO: extrapolation?
 static occa::memory o_Tsource;
+static occa::memory o_invJw;  // TODO: issue with strogGrad
 
 occa::kernel TrhsKernel;
 occa::kernel GrhsKernel;
 occa::kernel compFluxChtKernel;
-occa::kernel opAdd3chtKernel;
 
 dfloat areaCHT_f, areaCHT_s;
 
@@ -191,14 +191,10 @@ void rteP1Model::buildKernel(occa::properties& kernelInfo)
   TrhsKernel = buildKernel("T_rhs");
   GrhsKernel = buildKernel("G_rhs");
   compFluxChtKernel = buildKernel("compFluxCht");
-  opAdd3chtKernel = buildKernel("opAdd3cht");
 }
 
 void rteP1Model::updateProperties(const double time, const int tstep)
 {
-//  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
-//  auto cds = nrs->cds;
-
   if (platform->comm.mpiRank == 0) {
     printf("RTE updateProperties %d %g sid=%d",tstep,time,P_RTE_GID);
   }
@@ -208,19 +204,14 @@ void rteP1Model::updateProperties(const double time, const int tstep)
 
     if (platform->comm.mpiRank == 0) printf(", hc=%12.4e", hc);
 
-    auto o_surfaceAreaRate = [&]()
+    auto o_surfaceAreaRate = [&]() // TODO, only do this once?
     {
       auto nbid = GbidRobin.size();
       auto o_bid = platform->o_memPool.reserve<int>(nbid);
       o_bid.copyFrom(GbidRobin.data(), nbid);
 
-      // mesh->o_invLMM is 1/dssum(LMM), we want 1/LMM
-      auto o_invLMM_ = platform->o_memPool.reserve<dfloat>(meshG->Nlocal);
-      o_invLMM_.copyFrom(meshG->o_LMM, meshG->Nlocal);
-      platform->linAlg->ady(meshG->Nlocal, 1.0, o_invLMM_);
-
       // compute area / bm1
-      auto o_surfaceAreaRate = meshG->surfaceAreaMultiply(nbid, o_bid, o_invLMM_);
+      auto o_surfaceAreaRate = meshG->surfaceAreaMultiply(nbid, o_bid, o_invJw);
       return o_surfaceAreaRate;
     }();
 
@@ -325,6 +316,11 @@ void rteP1Model::setup(nrs_t *nrs, std::vector<int> GbidRobin_)
   o_Glambda1 = platform->device.malloc<dfloat>(cds->fieldOffset[P_RTE_GID]);
   o_Tsource = platform->device.malloc<dfloat>(cds->fieldOffset[P_RTE_TID]);
 
+  // TODO: for strongGrad issue
+  o_invJw = platform->device.malloc<dfloat>(cds->fieldOffset[P_RTE_TID]);
+  o_invJw.copyFrom(meshT->o_LMM, meshT->Nlocal);
+  platform->linAlg->ady(meshT->Nlocal, 1.0, o_invJw);
+
   // Fill variables
   rteP1Model::updateProperties(0.0, 0);
 
@@ -386,12 +382,6 @@ void rteP1Model::checkCHTFlux(nrs_t *nrs, const double time, const int tstep,
                               std::vector<int> TbidFluidSide,
                               std::vector<int> TbidSolidSide)
 {
-  nekrsCheck(1,
-             platform->comm.mpiComm,
-             EXIT_FAILURE, 
-             "%s\n", 
-             "(FIXME) This function is not correct...!");
-
   auto cds = nrs->cds;
   const dlong TfieldOffset = cds->fieldOffset[P_RTE_TID];
   occa::memory o_T = cds->o_S + cds->fieldOffsetScan[P_RTE_TID];
@@ -414,45 +404,45 @@ void rteP1Model::checkCHTFlux(nrs_t *nrs, const double time, const int tstep,
   auto o_bid_s = o_copy_bid(TbidSolidSide);
   auto o_bidBoth = o_copy_bid(bidBoth);
 
-  // compute flux
+  // surface area
+  if (!checkCHTFluxCalled) {
+    auto o_one = platform->o_memPool.reserve<dfloat>(TfieldOffset);
+    platform->linAlg->fill(meshT->Nlocal, 1.0, o_one);
+    areaCHT_f = meshT->surfaceAreaMultiplyIntegrate(o_bid_f.length(), o_bid_f, o_one).at(0);
+    areaCHT_s = meshT->surfaceAreaMultiplyIntegrate(o_bid_s.length(), o_bid_s, o_one).at(0);
+    checkCHTFluxCalled = true;
+  }
+
+  // compute gradient, TODO: strongGrad issue
   auto my_grad = [](mesh_t *mesh, dlong offset, occa::memory o_fld)
   {
-    auto o_grad = platform->o_memPool.reserve<dfloat>(3*offset);
-    opSEM::strongGrad(mesh, offset, o_fld, o_grad); // weak grad
-    oogs::startFinish(o_grad, 3, offset, ogsDfloat, ogsAdd, mesh->oogs);
-    platform->linAlg->axmyMany(mesh->Nlocal, 3, offset, 0, 1.0, mesh->o_invLMM, o_grad);    
+    auto o_grad = opSEM::strongGrad(mesh, offset, o_fld); // weak grad
+    platform->linAlg->axmyMany(mesh->Nlocal, 3, offset, 0, 1.0, o_invJw, o_grad);
     return o_grad;
   };
   auto o_gradT = my_grad(meshT, TfieldOffset, o_T);
-  auto o_gradG = my_grad(meshG, TfieldOffset, o_G);
-//  auto o_fluxAll = platform->o_memPool.reserve<dfloat>(3*TfieldOffset);
-  auto o_Jdotn = platform->o_memPool.reserve<dfloat>(TfieldOffset);
 
-  const dfloat rte_coef = 4.0 / (3.0 * P_RTE_TAU * P_RTE_BO);
-/*
-  opAdd3chtKernel(meshT->Nelements,
-                  TfieldOffset,
-                  meshT->o_elementInfo,
-                  -1.0*conFluid,
-                  -1.0*conSolid,
-                  o_gradT,
-                  -1.0*rte_coef,
-                  0.0,
-                  o_gradG,
-                  o_fluxAll);
-
-  auto flux_f = meshT->surfaceAreaNormalMultiplyIntegrate(
+  // nusselt number
+  auto dTdn_f = meshT->surfaceAreaNormalMultiplyIntegrate(
                                       TfieldOffset,
                                       o_bid_f.length(),
                                       o_bid_f,
-                                      o_fluxAll).at(0);
-  auto flux_s = meshT->surfaceAreaNormalMultiplyIntegrate(
-                                      TfieldOffset,
-                                      o_bid_s.length(),
-                                      o_bid_s,
-                                      o_fluxAll).at(0);
+                                      o_gradT).at(0);
 
-*/
+  dfloat nu = dTdn_f / areaCHT_f;
+
+  if (platform->comm.mpiRank == 0) {
+    printf("%9d %11.4e %11.4e %11.4e %11.4e nusselt(rs)\n",
+           tstep, time, dTdn_f, areaCHT_f, nu);
+  }
+
+  if (!nrs->cht) return;
+
+  // compute flux: o_Jdotn = ( - con * grad T - coef*grad G ) dot n
+  const dfloat rte_coef = 4.0 / (3.0 * P_RTE_TAU * P_RTE_BO);
+
+  auto o_gradG = my_grad(meshG, TfieldOffset, o_G);
+  auto o_Jdotn = platform->o_memPool.reserve<dfloat>(TfieldOffset);
   compFluxChtKernel(meshT->Nelements,
                     TfieldOffset,
                     o_bidBoth.length(),
@@ -471,21 +461,12 @@ void rteP1Model::checkCHTFlux(nrs_t *nrs, const double time, const int tstep,
   auto flux_f = meshT->surfaceAreaMultiplyIntegrate(o_bid_f.length(), o_bid_f, o_Jdotn).at(0);
   auto flux_s = meshT->surfaceAreaMultiplyIntegrate(o_bid_s.length(), o_bid_s, o_Jdotn).at(0);
 
-  if (!checkCHTFluxCalled) {
-    auto o_one = platform->o_memPool.reserve<dfloat>(TfieldOffset);
-    platform->linAlg->fill(meshT->Nlocal, 1.0, o_one);
-    areaCHT_f = meshT->surfaceAreaMultiplyIntegrate(o_bid_f.length(), o_bid_f, o_one).at(0);
-    areaCHT_s = meshT->surfaceAreaMultiplyIntegrate(o_bid_s.length(), o_bid_s, o_one).at(0);
-    checkCHTFluxCalled = true;
-  }
-
-  // chk1: total flux, err = int_gamma_f J_f dot n_f + int_gamma_s J_f dot n_s
+  // chk1: total flux
   auto err1 = fabs(flux_f + flux_s);
 
-  // chk2: pointwise flux, err = max abs [[J]]  = max abs dssum(Js,Jf); FIXME
+  // chk2: pointwise flux, err = max abs [[J]] = max abs dssum(Js,Jf);
   oogs::startFinish(o_Jdotn, 1, TfieldOffset, ogsDfloat, ogsAdd, meshT->oogs);
   auto err2 = platform->linAlg->amax(meshT->Nlocal, o_Jdotn, platform->comm.mpiComm);
-//  auto err2 = 0.0;
 
   // chk3: area chk
   auto err3 = fabs(areaCHT_f - areaCHT_s);

@@ -432,7 +432,7 @@ void rteP1Model::checkCHTFlux(nrs_t *nrs, const double time, const int tstep,
   dfloat nu = dTdn_f / areaCHT_f;
 
   if (platform->comm.mpiRank == 0) {
-    printf("%9d %11.4e %11.4e %11.4e %11.4e nusselt(rs)\n", 
+    printf("%9d %11.4e %11.4e %11.4e %11.4e nusselt(rs)\n",
            tstep, time, dTdn_f, areaCHT_f, nu);
   }
 

@@ -17,30 +17,11 @@ void solve(nrs_t *nrs, const int is, const dfloat timeNew, const int tstep,
 namespace
 {
 std::vector<bool> scalarSetupCalled;
-bool initCalled = false;
+static bool initCalled = false;
 std::vector<int> cdsComputeBak;
 
-double timerTotalCalled = 0.0; // total time spent in hmhSolver
-int numTotalCalled = 0;
-}
-
-static void initialization(const int NSfields)
-{
-  nekrsCheck(initCalled,
-             platform->comm.mpiComm,
-             EXIT_FAILURE,
-             "%s\n",
-             "hmhSolver has already been initialized!");
-
-  nekrsCheck(NSfields==0,
-             platform->comm.mpiComm,
-             EXIT_FAILURE,
-             "%s\n",
-             "NSfields cannot be 0!");
-
-  scalarSetupCalled.resize(NSfields, false);
-  platform->timer.addUserStat("myHmhSolver::");
-  initCalled = true;
+static std::vector<double> timerTotal; // total time spent in hmhSolver
+static int numTotalCalled = 0;
 }
 
 static void turnOnCdsCompute(cds_t *cds, const int is_in)
@@ -60,10 +41,30 @@ static void recoverCdsCompute(cds_t *cds)
   }
 }
 
+static void initialization(const int NSfields)
+{
+  nekrsCheck(initCalled,
+             platform->comm.mpiComm,
+             EXIT_FAILURE,
+             "%s\n",
+             "hmhSolver has already been initialized!");
+
+  nekrsCheck(NSfields==0,
+             platform->comm.mpiComm,
+             EXIT_FAILURE,
+             "%s\n",
+             "NSfields cannot be 0!");
+
+  scalarSetupCalled.resize(NSfields, false);
+  timerTotal.resize(NSfields, 0);
+  platform->timer.addUserStat("myHmhSolver::");
+  initCalled = true;
+}
 
 // setup elliptic solver
 void hmhSolver::setup(nrs_t *nrs, const int is)
 {
+  nrs = dynamic_cast<nrs_t *>(platform->solver);
   cds_t *cds = nrs->cds;
   const int NSfields = (cds) ? cds->NSfields : 0;
 
@@ -89,7 +90,6 @@ void hmhSolver::setup(nrs_t *nrs, const int is)
              "scalarId %d needed to be turned on in par!!\n",
              is);
 
-  const auto solverName = cds->cvodeSolve[is] ? "CVODE" : "ELLIPTIC";
   nekrsCheck(cds->cvodeSolve[is],
              platform->comm.mpiComm,
              EXIT_FAILURE,
@@ -153,12 +153,14 @@ void hmhSolver::solve(nrs_t *nrs, const int is, const dfloat timeNew, const int 
     o_diff_i.copyFrom(o_h1_in, mesh->Nlocal);
     o_rho_i.copyFrom(o_h2_in, mesh->Nlocal);
 
+/*  FIXME: https://github.com/stgeke/nekRS/commit/8cd1cc25d6f0966c34fb0e975e1188248208bf98
     // AVM (from evaluateProperties)
     std::string regularizationMethod;
     platform->options.getArgs("SCALAR" + sid + " REGULARIZATION METHOD", regularizationMethod);
     const bool applyAVM = regularizationMethod.find("AVM_HIGHEST_MODAL_DECAY") != std::string::npos;
     if (applyAVM)
       avm::apply(cds, timeNew, is, cds->o_S);
+*/
   }
 
   // rhs
@@ -171,7 +173,7 @@ void hmhSolver::solve(nrs_t *nrs, const int is, const dfloat timeNew, const int 
       cds->filterRTKernel(cds->meshV->Nelements,
                           is,
                           1,
-                          cds->fieldOffset[0],
+                          cds->o_fieldOffsetScan,
                           cds->o_applyFilterRT,
                           cds->o_filterRT,
                           cds->o_filterS,
@@ -258,19 +260,22 @@ void hmhSolver::solve(nrs_t *nrs, const int is, const dfloat timeNew, const int 
   // main solve
   std::string precUpdateBackUp;
   platform->options.getArgs("ELLIPTIC PRECO COEFF FIELD", precUpdateBackUp);
-  platform->options.setArgs("ELLIPTIC PRECO COEFF FIELD", "TRUE");
+  platform->options.setArgs("ELLIPTIC PRECO COEFF FIELD", "TRUE"); //FIXME gmres
+
   platform->timer.tic("myHmhSolver::S" + sid + "::solve");
   cds->solver[is]->solve(o_lambda0, o_lambda1, o_rhs, o_S);
   platform->timer.toc("myHmhSolver::S" + sid + "::solve");
+
   platform->options.setArgs("ELLIPTIC PRECO COEFF FIELD", precUpdateBackUp);
   o_S.copyTo(cds->o_S, cds->fieldOffset[is], cds->fieldOffsetScan[is]);
 
   recoverCdsCompute(cds);
   platform->timer.toc("myHmhSolver::S"+sid);
 
-  timerTotalCalled += platform->timer.query("myHmhSolver::S" + sid, "DEVICE:MAX");
+  timerTotal.at(is) = platform->timer.query("myHmhSolver::S" + sid, "DEVICE:MAX");
+  auto timerTotalCalled = std::accumulate(timerTotal.begin(), timerTotal.end(), 0.0);
   numTotalCalled++;
-  platform->timer.set("myHmhSolver::Total", timerTotalCalled, numTotalCalled);
+  platform->timer.set("myHmhSolver::Total", timerTotalCalled, numTotalCalled); // in case of many scalar
   auto tPrec = platform->timer.query("scalar" + sid + " preconditioner", "DEVICE:MAX");
   auto nPrec = platform->timer.count("scalar" + sid + " preconditioner");
   platform->timer.set("myHmhSolver::S" + sid + "::solve::preconditioner", tPrec, nPrec);

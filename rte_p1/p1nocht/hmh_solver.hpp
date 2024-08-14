@@ -20,7 +20,7 @@ std::vector<bool> scalarSetupCalled;
 static bool initCalled = false;
 std::vector<int> cdsComputeBak;
 
-static double timerTotalCalled = 0.0; // total time spent in hmhSolver
+static std::vector<double> timerTotal; // total time spent in hmhSolver
 static int numTotalCalled = 0;
 }
 
@@ -56,6 +56,7 @@ static void initialization(const int NSfields)
              "NSfields cannot be 0!");
 
   scalarSetupCalled.resize(NSfields, false);
+  timerTotal.resize(NSfields, 0);
   platform->timer.addUserStat("myHmhSolver::");
   initCalled = true;
 }
@@ -271,9 +272,10 @@ void hmhSolver::solve(nrs_t *nrs, const int is, const dfloat timeNew, const int 
   recoverCdsCompute(cds);
   platform->timer.toc("myHmhSolver::S"+sid);
 
-  timerTotalCalled += platform->timer.query("myHmhSolver::S" + sid, "DEVICE:MAX");
+  timerTotal.at(is) = platform->timer.query("myHmhSolver::S" + sid, "DEVICE:MAX");
+  auto timerTotalCalled = std::accumulate(timerTotal.begin(), timerTotal.end(), 0.0);
   numTotalCalled++;
-  platform->timer.set("myHmhSolver::Total", timerTotalCalled, numTotalCalled);
+  platform->timer.set("myHmhSolver::Total", timerTotalCalled, numTotalCalled); // in case of many scalar
   auto tPrec = platform->timer.query("scalar" + sid + " preconditioner", "DEVICE:MAX");
   auto nPrec = platform->timer.count("scalar" + sid + " preconditioner");
   platform->timer.set("myHmhSolver::S" + sid + "::solve::preconditioner", tPrec, nPrec);
