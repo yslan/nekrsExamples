@@ -81,9 +81,8 @@ dfloat nusselt::compute(nrs_t* nrs, std::vector<int> bIDList, occa::memory o_tem
   const dlong NfpTotal = mesh->Nelements * mesh->Nfaces * mesh->Nfp;
 
   dfloat sbuf[2] = {0, 0};
-  int iter = 0;
+  
   for (const int &bid : bIDList) { // accumulate flux for multiple bcid
-
     // TODO, strong grad w/o gs, get rid of nrs
     nrs->gradientVolumeKernel(mesh->Nelements,
                               mesh->o_vgeo,
@@ -112,10 +111,8 @@ dfloat nusselt::compute(nrs_t* nrs, std::vector<int> bIDList, occa::memory o_tem
     o_sum2.copyTo(sum2, Nblock*sizeof(dfloat)); 
   
     // reduction 2: host
-    if (iter==0) {   // only sum area once
-      for (int n = 0; n < Nblock; n++) { 
-        sbuf[0] += sum1[n];
-      }
+    for (int n = 0; n < Nblock; n++) { 
+      sbuf[0] += sum1[n];
     }
     for (int n = 0; n < Nblock; n++) {
        sbuf[1] += sum2[n];
