@@ -22,7 +22,7 @@ void UDF_Setup0(MPI_Comm comm, setupAide &options)
 
 void UDF_Setup()
 {
-  nrs->userConvergenceCheck = timeStepConverged;
+  nrs->userConvergenceCheck = &timeStepConverged;
 }
 
 void UDF_ExecuteStep(double time, int tstep)
