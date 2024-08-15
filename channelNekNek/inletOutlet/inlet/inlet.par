@@ -1,0 +1,42 @@
+[GENERAL]
+polynomialOrder = 7
+dt = 5e-04
+timeStepper = tombo2
+numSteps = 1000
+writeControl = steps
+writeInterval = 100
+
+[PROBLEMTYPE]
+equation = navierStokes+variableViscosity
+
+[PRESSURE]
+residualTol = 1e-04
+
+[NEKNEK]
+boundaryEXTOrder = 3
+
+[VELOCITY]
+boundaryTypeMap = inlet,int,wall, slipY
+residualTol = 1e-06
+density = 1.0
+viscosity = -100.0 #-1000. 
+initialGuess = previous
+
+[TEMPERATURE]
+#solver = none
+boundaryTypeMap = inlet,int,inlet,insulated 
+residualTol = 1e-06
+rhoCp = 1.0
+conductivity = -100.0 #-43500. 
+
+#[SCALAR01] # k
+#boundaryTypeMap = inlet,int,inlet,insulated 
+#residualTol = 1e-08
+#rho = 1.0
+#diffusivity = -100.0 #-43500. 
+#
+#[SCALAR02] # tau
+#boundaryTypeMap = inlet,int,inlet,insulated 
+#residualTol = 1e-06
+#rho = 1.0
+#diffusivity = -100.0 #-43500. 

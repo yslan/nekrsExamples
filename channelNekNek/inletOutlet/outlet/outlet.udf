@@ -1,0 +1,33 @@
+//
+// nekRS User Defined File
+//
+#ifdef __okl__
+
+#include "outlet.oudf"
+
+#endif
+bool timeStepConverged(int stage)
+{
+  // default, stage = 1, neknek EXT 2,3 will needs more
+  return (stage == nrs->neknek->nEXT()) : true : false;
+}
+
+void UDF_LoadKernels(occa::properties& kernelInfo)
+{
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+}
+
+void UDF_Setup()
+{
+  nrs->userConvergenceCheck = timeStepConverged;
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  if (tstep == 0) {
+    nrs->writeCheckpoint(time, tstep);
+  }
+}
