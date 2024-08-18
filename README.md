@@ -25,3 +25,6 @@ Here we focus on porting Nek5000 functionality into NekRS
 
 - rte_p1    
   radiation transfer, P1 model
+
+- filter    
+  Nek5000's explicit filter
