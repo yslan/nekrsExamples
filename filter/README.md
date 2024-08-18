@@ -11,7 +11,7 @@ TODO: maybe change to an example that does need filtering.
 
 See the Nek5000 [docuentation](https://nek5000.github.io/NekDoc/problem_setup/filter.html).
 
-Basically, in each direction, it changes the basis, rescale the magnitude with diagonal matrix then change the basis back. The whole action is stored intoa 1D matrix and the kernel simply do max-vec in each direction, elements by elements.
+Basically, in each direction, it changes the basis, rescale the magnitude with diagonal matrix then change the basis back. The whole action is stored into a 1D matrix and the kernel simply do max-vec in each directions, elements by elements.
 
 
 ### Case setup
@@ -22,22 +22,24 @@ Basically, in each direction, it changes the basis, rescale the magnitude with d
 
 3. Turn off `regularization` for the desired field.       
    This is user's responsibility.
-   We don't check this in the code since user can have both filter turning on.
+   We don't check this in the code since user may want to apply filter at will to arbitrary fields, says post-processing the Q-criterion.
 
 4. Call `nekFilter::buildKernel(kernelInfo);` in the UDF function `UDF_LoadKernels`.
 
-5. Call the setup function with arbitary "tag", following by the mesh, filterNode and filterWeight. It can have multiple filter for each fields.
+5. Call the setup function with a name tag of the filter, following by the mesh, filterNode and filterWeight. It can have multiple filters for each fields. e.g.
    ```
    nekFilter::setup("vel", nrs->meshV, 1, 0.01);
    nekFilter::setup("pr",  nrs->meshV, 2, 0.1);
    nekFilter::setup("ttt", cds->mesh[0], 1, 0.5);
    ```
 
-6. Apply filter in `UDF_ExecuteStep`. Use tag to apply the specific filter.
+6. Apply filter in `UDF_ExecuteStep`. Use the name tag to apply the specific filter.
    ```
    nekFilter::setup("vel", o_UX);
    nekFilter::setup("vel", o_UY);
    nekFilter::setup("vel", o_UZ);
+
+   nekFilter::setup("ttt", cds->o_S);
    ```
 
 ### Verification
@@ -45,8 +47,8 @@ Basically, in each direction, it changes the basis, rescale the magnitude with d
 We use Nek5000's filter as a reference.
 
 Every `nrs->isCheckpointStep=1`, we call `userchk` twice. 
-At the first call, it copies the solutions to work arrays and applies filter in USR.
-Then, filter is applied in UDF and the second `userchk` compare results from both.
+At the first call, it copies the solutions to work arrays and applies filter in Nek5000.
+Then, NekRS' filter is applied after and the second `userchk` compares results from both.
 
 We expect to see the folloeing in the logfile.
 
@@ -67,7 +69,7 @@ We expect to see the folloeing in the logfile.
   filt trn 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 0.9975 0.9900
   ```
 
-- max. abs. err
+- max. abs. err (TODO: maybe rel error is more meaningful?)
   ```
   # step             err_vx      err_vy      err_vz      err_pr    err_temp      err_s1
        2 qfilt:  2.2751E-10  2.2732E-10  2.2727E-10  1.9351E-11  7.4273E-08  4.3079E-10
