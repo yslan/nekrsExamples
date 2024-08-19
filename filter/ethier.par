@@ -40,8 +40,8 @@ P_D0 = 0.5
 P_OMEGA = 15.0
 P_AMP = 1.5
 
-P_vel_filterNc = 1
+P_vel_filterNc = 3
 P_vel_filterWght = 0.1
 
-P_temp_filterNc = 2
+P_temp_filterNc = 5
 P_temp_filterWght = 0.01

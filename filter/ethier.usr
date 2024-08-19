@@ -94,6 +94,8 @@ C-----------------------------------------------------------------------
 
       endif
 
+      call chk_error
+
       return
       end
 c-----------------------------------------------------------------------
@@ -355,6 +357,17 @@ c-----------------------------------------------------------------------
 
       nv = lx1*ly1*lz1*nelv
       nt = lx1*ly1*lz1*nelt
+
+      ! max abs of ref sol.
+      err(1) = glamax(u_wrk(1,1),nv)
+      err(2) = glamax(u_wrk(1,2),nv)
+      err(3) = glamax(u_wrk(1,3),nv)
+      err(4) = glamax(u_wrk(1,4),nv)
+      do i=1,npscal+1
+         err(4+i) = glamax(u_wrk(1,4+i),nt)
+      enddo
+
+      ! compute error
       call sub2(u_wrk(1,1),vx,nv)
       call sub2(u_wrk(1,2),vy,nv)
       call sub2(u_wrk(1,3),vz,nv)
@@ -364,13 +377,12 @@ c-----------------------------------------------------------------------
          call sub2(u_wrk(1,4+i),t(1,1,1,1,i),nt)
       enddo
 
-      err(1) = glamax(u_wrk(1,1),nv)
-      err(2) = glamax(u_wrk(1,2),nv)
-      err(3) = glamax(u_wrk(1,3),nv)
-      err(4) = glamax(u_wrk(1,4),nv)
-
+      err(1) = glamax(u_wrk(1,1),nv) / err(1)
+      err(2) = glamax(u_wrk(1,2),nv) / err(2)
+      err(3) = glamax(u_wrk(1,3),nv) / err(3)
+      err(4) = glamax(u_wrk(1,4),nv) / err(4)
       do i=1,npscal+1
-         err(4+i) = glamax(u_wrk(1,4+i),nt)
+         err(4+i) = glamax(u_wrk(1,4+i),nt) / err(4+i)
       enddo
 
       if (nio.eq.0) then
@@ -387,7 +399,7 @@ c-----------------------------------------------------------------------
       include 'SIZE'
       include 'TOTAL'
 
-      integer ncut
+      integer ncut, i, j
       real intv(lx1,lx1), wght
 
       if (ncut.eq.0) return
@@ -395,6 +407,13 @@ c-----------------------------------------------------------------------
       if (ifaxis) call exitti('Filtering not supported w/ IFAXIS!$',1)
 
       call build_new_filter(intv,zgm1,lx1,ncut,wght,nio)
+
+      if (nio.eq.0.AND.loglevel.gt.2) then
+         do j=1,lx1
+            write(6,1) (intv(i,j),i=1,lx1)
+         enddo
+      endif
+    1 format('filt mat (5k):',1p50e12.4)
 
       return
       end

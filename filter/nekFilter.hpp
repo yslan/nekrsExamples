@@ -97,6 +97,34 @@ void filterVandermonde1D(int N, int Np, double *r, double *V)
     sk++;
   }
 }
+
+void legendre_poly(double *L, const double x, const int N)
+{
+   L[0] = 1.0;
+   L[1] = x;
+   for (int j = 2; j <= N; j++) {
+      const double dj = j;
+      L[j] = ( (2*dj-1) * x * L[j-1] - (j-1) * L[j-2] ) / dj;
+   }
+}
+
+
+void filterBubbleFunc1D(int N, int Np, double *r, double *V)
+{
+  auto Lj = (double *)malloc(Np * sizeof(double));
+
+  for (int j = 0; j <= N; j++) {
+    const double z = r[j];
+    legendre_poly(Lj, z, N);
+
+    V[0 * Np + j] = Lj[0];
+    V[1 * Np + j] = Lj[1];
+    for (int i = 2; i < Np; i++) {
+      V[i * Np + j] = Lj[i] - Lj[i-2];
+    }
+  }
+  free(Lj);
+}
 } // namespace func
 
 
@@ -127,6 +155,12 @@ void nekFilter::buildKernel(occa::properties& kernelInfo)
 
 // apply wght to diagonal
 void filterFunctionRelaxation1D_new(int Nmodes, int Nc, double wght, double *A) {
+
+  // zero matrix
+  for (int n = 0; n < Nmodes*Nmodes; n++) {
+    A[n] = 0.0;
+  }
+
   // Set all diagonal to 1
   for (int n = 0; n < Nmodes; n++) {
     A[n * Nmodes + n] = 1.0;
@@ -142,8 +176,7 @@ void filterFunctionRelaxation1D_new(int Nmodes, int Nc, double wght, double *A) 
 occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh, 
                                     const dlong filterNc, const dfloat filterWght) {
 
-//  const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
-  const int verbose = 1; // Let's print it all the time
+  const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
 
   nekrsCheck(filterNc < 1,
              platform->comm.mpiComm,
@@ -166,7 +199,7 @@ occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh,
   // Construct Filter Function
   filterFunctionRelaxation1D_new(Nmodes, filterNc, filterWght, A); // Main difference
 
-  if (verbose && platform->comm.mpiRank == 0) {
+  if (platform->comm.mpiRank == 0) {
     printf("filt trn (rs) %5s:", tag.c_str());
     for (int k = 0; k < Nmodes; k++) {
       printf("%7.4f", A[k + Nmodes * k]);
@@ -180,7 +213,8 @@ occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh,
     for (int i = 0; i < mesh->Np; i++) {
       r[i] = mesh->r[i];
     }
-    filterVandermonde1D(mesh->N, Nmodes, r, V);
+//  filterVandermonde1D(mesh->N, Nmodes, r, V); // Legrendre Polyn.^T
+    filterBubbleFunc1D(mesh->N, Nmodes, r, V);  // bubble of Legendre
     free(r);
   }
 
@@ -206,8 +240,8 @@ occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh,
   nekrsCheck(INFO, MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "dgetri failed");
 
   // V*A*V^-1 in row major
-  char TRANSA = 'T';
-  char TRANSB = 'T';
+  char TRANSA = 'N';
+  char TRANSB = 'N';
   double ALPHA = 1.0, BETA = 0.0;
   int MD = Nmodes;
   int ND = Nmodes;
@@ -221,7 +255,7 @@ occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh,
 
   dgemm_(&TRANSA, &TRANSB, &MD, &ND, &KD, &ALPHA, A, &LDA, iV, &LDB, &BETA, C, &LDC);
 
-  TRANSA = 'T';
+  TRANSA = 'N';
   TRANSB = 'N';
 
   dgemm_(&TRANSA, &TRANSB, &MD, &ND, &KD, &ALPHA, V, &LDA, C, &LDB, &BETA, A, &LDC);
@@ -234,6 +268,16 @@ occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh,
     }
     o_A.copyFrom(tmp, o_A.length());
     free(tmp);
+  }
+
+  if (verbose && platform->comm.mpiRank == 0) {
+    for (int j = 0; j < Nmodes; j++) {
+      printf("filt mat (rs) %5s:", tag.c_str());
+      for (int i = 0; i < Nmodes; i++) {
+        printf("%11.4e", A[i + Nmodes * j]);
+      }
+      printf("\n");
+    }
   }
 
   free(A);
