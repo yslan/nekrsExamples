@@ -302,7 +302,7 @@ occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh,
   return o_A;
 }
 
-void explicitFilterApply(std::string tag, occa::memory o_fld) {
+void explicitFilterApply(std::string tag,  mesh_t *mesh, const dlong filterNc, const dfloat filterWght, occa::memory o_fld) {
 
   FilterContainer m = filterMap[tag];
 
@@ -336,21 +336,24 @@ void UDF_ExecuteStep(double time, int tstep)
   cds_t *cds = nrs->cds;
 
   { // apply explicit filter manually
+    auto meshV = nrs->meshV;
+    auto meshT = cds->mesh[0];
+
     auto o_UX = nrs->o_U + 0 * nrs->fieldOffset;
     auto o_UY = nrs->o_U + 1 * nrs->fieldOffset;
     auto o_UZ = nrs->o_U + 2 * nrs->fieldOffset;
   
-    explicitFilterApply("vel", 1, 0.01, o_UX);
-    explicitFilterApply("vel", 1, 0.01, o_UY);
-    explicitFilterApply("vel", 1, 0.01, o_UZ);
-    explicitFilterApply("vel", 1, 0.01, nrs->o_P);
+    explicitFilterApply("vel", meshV, 1, 0.01, o_UX);
+    explicitFilterApply("vel", meshV, 1, 0.01, o_UY);
+    explicitFilterApply("vel", meshV, 1, 0.01, o_UZ);
+    explicitFilterApply("vel", meshV, 1, 0.01, nrs->o_P);
   
     for (int is = 0; is < cds->NSfields; is++) {
       if (!cds->compute[is] || cds->cvodeSolve[is]) {
         continue;
       }
       auto o_Si = cds->o_S + cds->fieldOffsetScan[is];
-      explicitFilterApply("temp", 2, 0.1, o_Si);
+      explicitFilterApply("temp", meshT, 2, 0.1, o_Si);
     }
   }
 /*
