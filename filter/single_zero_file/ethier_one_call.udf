@@ -302,42 +302,22 @@ occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh,
   return o_A;
 }
 
-
-void explicitFilterSetup(std::string tag, mesh_t *mesh_in, int nModes, double strength) {
-
-  FilterContainer m = filterMap[tag];
-
-  nekrsCheck(m.setupCalled,
-             platform->comm.mpiComm,
-             EXIT_FAILURE,
-             "filter %s has already been setup!\n",
-             tag.c_str());
-  
-  m.mesh = mesh_in;
-  m.nModes = nModes;
-  m.strength = strength;
-
-  if (m.nModes > 0 && m.strength > 0) {
-    m.o_filterRT = lowPassFilterSetup_new(tag, mesh_in, nModes, strength);
-  }
-  m.setupCalled = true;
-
-  filterMap[tag] = m;
-}
-
 void explicitFilterApply(std::string tag, occa::memory o_fld) {
 
   FilterContainer m = filterMap[tag];
 
-  nekrsCheck(!m.setupCalled,
-             platform->comm.mpiComm,
-             EXIT_FAILURE,
-             "filter %s is not setup!\n",
-             tag.c_str());
-
-  if (m.nModes > 0 && m.strength > 0) {
-    filterTensor3(m.mesh->Nelements, m.o_filterRT, o_fld);
+  if (!m.setupCalled) {
+    m.mesh = mesh_in;
+    m.nModes = nModes;
+    m.strength = strength;
+  
+    m.o_filterRT = lowPassFilterSetup_new(tag, mesh_in, nModes, strength);
+    m.setupCalled = true;
+  
+    filterMap[tag] = m;
   }
+
+  filterTensor3(m.mesh->Nelements, m.o_filterRT, o_fld);
 }
 
 void UDF_LoadKernels(deviceKernelProperties& kernelInfo)
@@ -348,8 +328,6 @@ void UDF_Setup()
 {
   auto nrs = dynamic_cast<nrs_t*>(platform->solver);
   cds_t *cds = nrs->cds;
-  explicitFilterSetup("vel", nrs->meshV, 1, 0.01); // name, mesh, #mode, wght
-  explicitFilterSetup("temp", cds->mesh[0], 2, 0.1);
 }
 
 void UDF_ExecuteStep(double time, int tstep)
@@ -362,17 +340,17 @@ void UDF_ExecuteStep(double time, int tstep)
     auto o_UY = nrs->o_U + 1 * nrs->fieldOffset;
     auto o_UZ = nrs->o_U + 2 * nrs->fieldOffset;
   
-    explicitFilterApply("vel", o_UX);
-    explicitFilterApply("vel", o_UY);
-    explicitFilterApply("vel", o_UZ);
-    explicitFilterApply("vel", nrs->o_P);
+    explicitFilterApply("vel", 1, 0.01, o_UX);
+    explicitFilterApply("vel", 1, 0.01, o_UY);
+    explicitFilterApply("vel", 1, 0.01, o_UZ);
+    explicitFilterApply("vel", 1, 0.01, nrs->o_P);
   
     for (int is = 0; is < cds->NSfields; is++) {
       if (!cds->compute[is] || cds->cvodeSolve[is]) {
         continue;
       }
       auto o_Si = cds->o_S + cds->fieldOffsetScan[is];
-      explicitFilterApply("temp", o_Si);
+      explicitFilterApply("temp", 2, 0.1, o_Si);
     }
   }
 /*
