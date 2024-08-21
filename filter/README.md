@@ -79,3 +79,12 @@ We expect to see the folloeing in the logfile.
       10 qfilt:  1.2242E-15  9.5829E-16  1.0199E-15  1.1080E-15  1.2242E-15  1.2244E-15
   ```
 
+
+### Single file
+
+See the case under `single_file/` with all functions put into the same file.
+
+See also `single_zero_file/` for removing the ethier setup and verification.
+
+
+

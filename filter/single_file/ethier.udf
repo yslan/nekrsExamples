@@ -1,0 +1,348 @@
+#include "randomVector.hpp"
+#include "linspaceVector.hpp"
+
+static dfloat P_U0;
+static dfloat P_V0;
+static dfloat P_W0;
+
+static dfloat P_A0;
+static dfloat P_D0;
+
+static dfloat P_OMEGA;
+static dfloat P_AMP;
+
+int p_filterNc_v, p_filterNc_t;
+double p_filterWght_v, p_filterWght_t;
+
+// filter
+struct FilterContainer
+{
+  int nModes = 0;
+  double strength = 0.0;
+
+  mesh_t *mesh;
+  occa::memory o_filterRT;
+
+  bool setupCalled = false;
+};
+
+std::map<std::string, FilterContainer> filterMap;
+
+#ifdef __okl__
+
+#include "ethier.oudf"
+
+#endif
+
+// apply wght to diagonal
+void filterFunctionRelaxation1D_new(int Nmodes, int Nc, double wght, double *A) {
+  // zero matrix
+  for (int n = 0; n < Nmodes*Nmodes; n++) {
+    A[n] = 0.0;
+  }
+
+  // Set all diagonal to 1
+  for (int n = 0; n < Nmodes; n++) {
+    A[n * Nmodes + n] = 1.0;
+  }
+
+  int k0 = Nmodes - Nc;
+  for (int k = k0; k < Nmodes; k++) {
+    double amp = wght * ((k + 1.0 - k0) * (k + 1.0 - k0)) / (Nc * Nc);
+    A[k + Nmodes * k] = 1.0 - amp;
+  }
+}
+
+void legendre_poly(double *L, const double x, const int N)
+{
+   L[0] = 1.0;
+   L[1] = x;
+   for (int j = 2; j <= N; j++) {
+      const double dj = j;
+      L[j] = ( (2*dj-1) * x * L[j-1] - (j-1) * L[j-2] ) / dj;
+   }
+}
+
+void filterBubbleFunc1D(int N, int Np, double *r, double *V)
+{
+  auto Lj = (double *)malloc(Np * sizeof(double));
+
+  for (int j = 0; j <= N; j++) {
+    const double z = r[j];
+    legendre_poly(Lj, z, N);
+
+    V[0 * Np + j] = Lj[0];
+    V[1 * Np + j] = Lj[1];
+    for (int i = 2; i < Np; i++) {
+      V[i * Np + j] = Lj[i] - Lj[i-2];
+    }
+  }
+  free(Lj);
+}
+
+occa::memory lowPassFilterSetup_new(std::string tag, mesh_t *mesh, 
+                                    const dlong filterNc, const dfloat filterWght) {
+
+  const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
+
+  nekrsCheck(filterNc < 1,
+             platform->comm.mpiComm,
+             EXIT_FAILURE,
+             "%s: filterNc must be at least 1, but is set to %d\n",
+             tag.c_str(), filterNc);
+
+  nekrsCheck(filterWght < 0 || filterWght > 1,
+             platform->comm.mpiComm,
+             EXIT_FAILURE,
+             "%s: filterWght must in [0,1], but is set to %g\n",
+             tag.c_str(), filterWght);
+
+  // Construct Filter Function
+  int Nmodes = mesh->N + 1; // N+1, 1D GLL points
+
+  auto V = (double *)calloc(Nmodes * Nmodes, sizeof(double));
+  auto A = (double *)calloc(Nmodes * Nmodes, sizeof(double));
+
+  // Construct Filter Function
+  filterFunctionRelaxation1D_new(Nmodes, filterNc, filterWght, A); // Main difference
+
+  if (platform->comm.mpiRank == 0) {
+    printf("filt trn (rs) %5s:", tag.c_str());
+    for (int k = 0; k < Nmodes; k++) {
+      printf("%7.4f", A[k + Nmodes * k]);
+    }
+    printf("\n");
+  }
+
+  // Construct Vandermonde Matrix
+  {
+    auto r = (double *)malloc(mesh->Np * sizeof(double));
+    for (int i = 0; i < mesh->Np; i++) {
+      r[i] = mesh->r[i];
+    }
+//  filterVandermonde1D(mesh->N, Nmodes, r, V); // Legrendre Polyn.^T
+    filterBubbleFunc1D(mesh->N, Nmodes, r, V);  // bubble of Legendre
+    free(r);
+  }
+
+  // Invert the Vandermonde
+  int INFO;
+  int N = Nmodes;
+  int LWORK = N * N;
+  double *WORK = (double *)calloc(LWORK, sizeof(double));
+  int *IPIV = (int *)calloc(Nmodes + 1, sizeof(int));
+  double *iV = (double *)calloc(Nmodes * Nmodes, sizeof(double));
+
+  for (int n = 0; n < (Nmodes + 1); n++) {
+    IPIV[n] = 1;
+  }
+  for (int n = 0; n < Nmodes * Nmodes; ++n) {
+    iV[n] = V[n];
+  }
+
+  dgetrf_(&N, &N, (double *)iV, &N, IPIV, &INFO);
+  nekrsCheck(INFO, MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "dgetrf failed");
+
+  dgetri_(&N, (double *)iV, &N, IPIV, (double *)WORK, &LWORK, &INFO);
+  nekrsCheck(INFO, MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "dgetri failed");
+
+  // V*A*V^-1 in row major
+  char TRANSA = 'N';
+  char TRANSB = 'N';
+  double ALPHA = 1.0, BETA = 0.0;
+  int MD = Nmodes;
+  int ND = Nmodes;
+  int KD = Nmodes;
+  int LDA = Nmodes;
+  int LDB = Nmodes;
+
+  double *C = (double *)calloc(Nmodes * Nmodes, sizeof(double));
+
+  int LDC = Nmodes;
+
+  dgemm_(&TRANSA, &TRANSB, &MD, &ND, &KD, &ALPHA, A, &LDA, iV, &LDB, &BETA, C, &LDC);
+
+  TRANSA = 'N';
+  TRANSB = 'N';
+
+  dgemm_(&TRANSA, &TRANSB, &MD, &ND, &KD, &ALPHA, V, &LDA, C, &LDB, &BETA, A, &LDC);
+
+  auto o_A = platform->device.malloc<dfloat>(Nmodes * Nmodes);
+  {
+    auto tmp = (dfloat *)calloc(Nmodes * Nmodes, sizeof(dfloat));
+    for (int i = 0; i < Nmodes * Nmodes; i++) {
+      tmp[i] = A[i];
+    }
+    o_A.copyFrom(tmp, o_A.length());
+    free(tmp);
+  }
+
+  if (verbose && platform->comm.mpiRank == 0) {
+    for (int j = 0; j < Nmodes; j++) {
+      printf("filt mat (rs) %5s:", tag.c_str());
+      for (int i = 0; i < Nmodes; i++) {
+        printf("%11.4e", A[i + Nmodes * j]);
+      }
+      printf("\n");
+    }
+  }
+
+  free(A);
+  free(V);
+  free(C);
+  free(iV);
+  free(IPIV);
+  free(WORK);
+
+  return o_A;
+}
+
+
+void explicitFilterSetup(std::string tag, mesh_t *mesh_in, int nModes, double strength) {
+
+  FilterContainer m = filterMap[tag];
+
+  nekrsCheck(m.setupCalled,
+             platform->comm.mpiComm,
+             EXIT_FAILURE,
+             "filter %s has already been setup!\n",
+             tag.c_str());
+  
+  m.mesh = mesh_in;
+  m.nModes = nModes;
+  m.strength = strength;
+
+  if (m.nModes > 0 && m.strength > 0) {
+    m.o_filterRT = lowPassFilterSetup_new(tag, mesh_in, nModes, strength);
+  }
+  m.setupCalled = true;
+
+  filterMap[tag] = m;
+}
+
+void explicitFilterApply(std::string tag, occa::memory o_fld) {
+
+  FilterContainer m = filterMap[tag];
+
+  nekrsCheck(!m.setupCalled,
+             platform->comm.mpiComm,
+             EXIT_FAILURE,
+             "filter %s is not setup!\n",
+             tag.c_str());
+
+  if (m.nModes > 0 && m.strength > 0) {
+    filterTensor3(m.mesh->Nelements, m.o_filterRT, o_fld);
+  }
+}
+
+
+
+void userq(double time)
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+  mesh_t *mesh = nrs->meshV;
+  cds_t *cds = nrs->cds;
+  const dlong Nlocal = nrs->meshV->Nelements * nrs->meshV->Np;
+
+  dpdx(Nlocal, time, mesh->o_x, mesh->o_y, mesh->o_z, 0 * cds->fieldOffset[0], nrs->cds->o_NLT);
+}
+
+void UDF_LoadKernels(deviceKernelProperties& kernelInfo)
+{
+  setupAide &options = platform->options;
+
+  dfloat mue, rho;
+  options.getArgs("VISCOSITY", mue);
+  options.getArgs("DENSITY", rho);
+  kernelInfo.define("p_nu") = mue / rho;
+  kernelInfo.define("p_U0") = P_U0;
+  kernelInfo.define("p_V0") = P_V0;
+  kernelInfo.define("p_W0") = P_W0;
+  kernelInfo.define("p_A") = P_A0 * M_PI;
+  kernelInfo.define("p_D") = P_D0 * M_PI;
+  kernelInfo.define("p_amp") = P_AMP;
+  kernelInfo.define("p_omega") = P_OMEGA;
+  kernelInfo.define("p_pi") = M_PI;
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+
+  platform->par->extract("casedata", "p_u0", P_U0);
+  platform->par->extract("casedata", "p_v0", P_V0);
+  platform->par->extract("casedata", "p_w0", P_W0);
+  platform->par->extract("casedata", "p_a0", P_A0);
+  platform->par->extract("casedata", "p_d0", P_D0);
+  platform->par->extract("casedata", "p_omega", P_OMEGA);
+  platform->par->extract("casedata", "p_amp", P_AMP);
+
+  platform->par->extract("casedata", "p_vel_filternc", p_filterNc_v);
+  platform->par->extract("casedata", "p_temp_filternc", p_filterNc_t);
+  platform->par->extract("casedata", "p_vel_filterwght", p_filterWght_v);
+  platform->par->extract("casedata", "p_temp_filterwght", p_filterWght_t);
+
+  if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+    *nek::ptr<double>("p_u0") = P_U0;
+    *nek::ptr<double>("p_v0") = P_V0;
+    *nek::ptr<double>("p_w0") = P_W0;
+
+    *nek::ptr<double>("p_a0") = P_A0;
+    *nek::ptr<double>("p_d0") = P_D0;
+    *nek::ptr<double>("p_omega") = P_OMEGA;
+    *nek::ptr<double>("p_amp") = P_AMP;
+
+    *nek::ptr<int>("p_filternc_v") = p_filterNc_v;
+    *nek::ptr<int>("p_filternc_t") = p_filterNc_t;
+    *nek::ptr<double>("p_filterwght_v") = p_filterWght_v;
+    *nek::ptr<double>("p_filterwght_t") = p_filterWght_t;
+  }
+}
+
+void UDF_Setup()
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+  cds_t *cds = nrs->cds;
+  explicitFilterSetup("vel", nrs->meshV, p_filterNc_v, p_filterWght_v);
+  explicitFilterSetup("temp", cds->mesh[0], p_filterNc_t, p_filterWght_t);
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  auto nrs = dynamic_cast<nrs_t*>(platform->solver);
+  mesh_t *mesh = nrs->meshV;
+  cds_t *cds = nrs->cds;
+
+  if (tstep <= 5) {
+    exactUVWP(mesh->Nlocal, time, mesh->o_x, mesh->o_y, mesh->o_z, nrs->fieldOffset, nrs->o_P, nrs->o_U);
+  }
+
+  if (nrs->isCheckpointStep) { // first call to copy solutions
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+
+  { // apply explicit filter
+    auto o_UX = nrs->o_U + 0 * nrs->fieldOffset;
+    auto o_UY = nrs->o_U + 1 * nrs->fieldOffset;
+    auto o_UZ = nrs->o_U + 2 * nrs->fieldOffset;
+  
+    explicitFilterApply("vel", o_UX);
+    explicitFilterApply("vel", o_UY);
+    explicitFilterApply("vel", o_UZ);
+    explicitFilterApply("vel", nrs->o_P);
+  
+    for (int is = 0; is < cds->NSfields; is++) {
+      if (!cds->compute[is] || cds->cvodeSolve[is]) {
+        continue;
+      }
+      auto o_Si = cds->o_S + cds->fieldOffsetScan[is];
+      explicitFilterApply("temp", o_Si);
+    }
+  }
+
+  if (nrs->isCheckpointStep) { // second call for checking nek's filter
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+}
