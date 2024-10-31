@@ -1,0 +1,41 @@
+c-----------------------------------------------------------------------
+      subroutine userchk
+      include 'SIZE'
+      include 'TOTAL'
+
+c      if (ifoutfld) call lambda2(t) 
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat3
+      include 'SIZE'
+      include 'TOTAL'
+
+c      ifto = .true. ! required to lambda2
+ 
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat2
+      include 'SIZE'
+      include 'TOTAL'
+
+      logical ifaln,ifnorx,ifnory,ifnorz
+
+      do iel=1,nelt
+      do ifc=1,2*ndim
+         if (cbc(ifc,iel,1) .eq. 'v  ') boundaryID(ifc,iel) = 1
+         if (cbc(ifc,iel,1) .eq. 'O  ') boundaryID(ifc,iel) = 2
+         if (cbc(ifc,iel,1) .eq. 'W  ') boundaryID(ifc,iel) = 3
+         if (cbc(ifc,iel,1) .eq. 'SYM') then
+            call chknord(ifaln,ifnorx,ifnory,ifnorz,ifc,iel)
+            boundaryid(ifc,iel) = 4
+            if (ifnorz) boundaryid(ifc,iel) = 5
+         endif
+      enddo
+      enddo
+
+      return
+      end
+c-----------------------------------------------------------------------

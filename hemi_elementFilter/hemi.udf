@@ -1,0 +1,134 @@
+#include "linspaceVector.hpp"
+
+#ifdef __okl__
+
+#include "hemi.oudf"
+
+#endif
+
+// CFL detection
+std::unique_ptr<iofld> iofld;
+occa::memory o_dx, h_scratch;
+bool cflSetupCalled = true;
+
+void cfl_setup() // copied from src/nrs/cfl.cpp
+{
+  auto mesh = nrs->mesh;
+  h_scratch = platform->device.mallocHost<dfloat>(mesh->Nelements);
+
+  if (nrs->elementType == QUADRILATERALS || nrs->elementType == HEXAHEDRA) {
+    std::vector<dfloat> dx(mesh->N + 1);
+
+    for (int n = 0; n < (mesh->N + 1); n++) {
+      if (n == 0) {
+        dx[n] = mesh->gllz[n + 1] - mesh->gllz[n];
+      } else if (n == mesh->N) {
+        dx[n] = mesh->gllz[n] - mesh->gllz[n - 1];
+      } else {
+        dx[n] = 0.5 * (mesh->gllz[n + 1] - mesh->gllz[n - 1]);
+      }
+
+      dx[n] = 1.0 / dx[n];
+    }
+
+    o_dx = platform->device.malloc<dfloat>(mesh->N + 1);
+    o_dx.copyFrom(dx.data());
+  }
+  
+  if (platform->comm.mpiRank == 0) {
+    printf("cflSetupCalled\n");
+  }
+  cflSetupCalled = false;
+}
+
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+}
+
+void UDF_Setup()
+{
+  auto mesh = nrs->mesh;
+
+  if (platform->options.getArgs("RESTART FILE NAME").empty()) {
+    auto [x, y, z] = mesh->xyzHost();
+
+    std::vector<dfloat> U(mesh->dim * nrs->fieldOffset, 0.0);
+    const auto c1 = M_PI * 0.5/0.6;
+    for(int n = 0; n < mesh->Nlocal; n++) {
+      const auto arg = c1 * z[n];
+      U[n + 0 * nrs->fieldOffset] = (arg > 0.5*M_PI) ? 1.0 : sin(arg);
+      U[n + 1 * nrs->fieldOffset] = 0;
+      U[n + 2 * nrs->fieldOffset] = 0;
+    }
+    nrs->o_U.copyFrom(U.data(), U.size());
+  }
+
+  // Create New iofld for CFL
+  iofld = iofldFactory::create();
+  iofld->open(mesh, iofld::mode::write, "cfl");
+  iofld->writeAttribute("polynomialOrder", std::to_string(mesh->N));
+  iofld->writeAttribute("outputMesh", "true");
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+
+  if (cflSetupCalled) {
+    cfl_setup();
+    cflSetupCalled = false;
+  }
+
+  { // Compute CFL
+    dfloat cflThreshold1 = 2.0; // used to detect high CFL
+    dfloat cflThreshold2 = 1.8; // used to dump element > this CFL
+
+    dfloat dt = nrs->dt[0];
+    auto mesh = nrs->mesh;
+    auto o_cfl = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nelements);
+
+    nrs->cflKernel(mesh->Nelements, dt, mesh->o_vgeo, o_dx, nrs->fieldOffset, nrs->o_U, mesh->o_U, o_cfl);
+
+    auto scratch = (dfloat *)h_scratch.ptr();
+    o_cfl.copyTo(scratch);
+
+    dfloat cfl = 0;
+    for (dlong n = 0; n < mesh->Nelements; ++n) {
+      cfl = std::max(cfl, scratch[n]);
+    }
+  
+    MPI_Allreduce(MPI_IN_PLACE, &cfl, 1, MPI_DFLOAT, MPI_MAX, platform->comm.mpiComm);
+
+    if (cfl > cflThreshold1) {
+
+      // select elements
+      auto elementFilter = [&]() 
+      { 
+        std::vector<int> elementFilter;
+        for(int e = 0; e < mesh->Nelements; e++) {
+           if (scratch[e] > cflThreshold2) elementFilter.push_back(e);
+        } 
+        return elementFilter;
+      }();
+      iofld->writeElementFilter(elementFilter);
+
+      { // quantity of interest
+        // velocity
+        std::vector<occa::memory> o_iofldU;
+        o_iofldU.push_back(nrs->o_U.slice(0 * nrs->fieldOffset, nrs->mesh->Nlocal));
+        o_iofldU.push_back(nrs->o_U.slice(1 * nrs->fieldOffset, nrs->mesh->Nlocal));
+        o_iofldU.push_back(nrs->o_U.slice(2 * nrs->fieldOffset, nrs->mesh->Nlocal));
+        iofld->addVariable("velocity", o_iofldU);
+      }
+
+      iofld->addVariable("time", time);
+      iofld->process();
+    }
+  }
+
+  if (nrs->checkpointStep) {
+    nrs->copyToNek(time, tstep);
+    nek::userchk();
+  }
+  if (nrs->lastStep) iofld->close();
+}

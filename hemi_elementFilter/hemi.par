@@ -1,0 +1,22 @@
+[GENERAL] 
+polynomialOrder = 7
+stopAt = numSteps
+numSteps= 200
+
+dt = 7e-3
+timeStepper = tombo2
+subCyclingSteps = 0
+
+checkpointControl = simulationTime 
+checkpointInterval = 1.0
+
+regularization = hpfrt + nModes = 1 + scalingCoeff = 8
+
+[PRESSURE]
+residualTol = 1e-04
+
+[VELOCITY]
+boundaryTypeMap = codedFixedValue, zeroGradient, zeroValue, zeroYValue/zeroGradient, zeroZValue/zeroGradient 
+residualTol = 1e-06
+rho = 1.0
+viscosity = 1/1400
