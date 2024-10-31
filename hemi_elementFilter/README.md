@@ -74,10 +74,10 @@ Expected behavior
   writing checkpoint ...
   ```
 
-- Visualization
+- Visualization   
   Note that ParaView seems to struggle when the number of elements changes.
   We save mesh to each checkpoint file and one might want to rename the file.
   For example, `mv cfl0.f00003 t30.f00001` then `visnek t3` yields a `t3.nek5000`
-  to open. 
-
-  ![](t3.png)
+  to open.
+  
+  <img src="t3.png" height="400" />
