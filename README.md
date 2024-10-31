@@ -28,3 +28,6 @@ Here we focus on porting Nek5000 functionality into NekRS
 
 - filter    
   Nek5000's explicit filter
+
+- `hemi_elementFilter`
+  detect CFL, only dump elelments aruond it using `elementFilter`
