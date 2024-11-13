@@ -5,6 +5,7 @@ The case is built on the top of the either example.
 TODO: maybe change to an example that does need filtering.
 
 - Version: NekRS v24-pre (repo/next, tested on 08/18/24)
+- `v23/` is added.
 
 
 ### Formulation

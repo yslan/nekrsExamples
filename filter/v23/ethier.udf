@@ -1,0 +1,154 @@
+//
+// nekRS User Defined File
+//
+
+#include "udf.hpp"
+
+#include <vector>
+#include "randomVector.hpp"
+#include "linspaceVector.hpp"
+
+#include "nekFilter.hpp"
+
+static dfloat P_U0;
+static dfloat P_V0;
+static dfloat P_W0;
+
+static dfloat P_A0;
+static dfloat P_D0;
+
+static dfloat P_OMEGA;
+static dfloat P_AMP;
+
+occa::memory o_x0, o_y0, o_z0;
+
+// nekFilter
+int p_filterNc_v, p_filterNc_t;
+double p_filterWght_v, p_filterWght_t;
+
+#ifdef __okl__
+#include "ethier.oudf"
+#endif
+
+void userq(nrs_t *nrs, dfloat time, occa::memory o_S, occa::memory o_FS)
+{
+  mesh_t *mesh = nrs->meshV;
+  cds_t *cds = nrs->cds;
+  const dlong Nlocal = nrs->meshV->Nelements * nrs->meshV->Np;
+
+  dpdx(Nlocal, time, mesh->o_x, mesh->o_y, mesh->o_z, 0 * cds->fieldOffset[0], o_FS);
+  dpdx(Nlocal, time, mesh->o_x, mesh->o_y, mesh->o_z, 1 * cds->fieldOffset[0], o_FS);
+}
+
+void UDF_LoadKernels(occa::properties &kernelInfo)
+{
+  // filter
+  nekFilter::buildKernel(kernelInfo);
+
+  dfloat mue, rho;
+  platform->options.getArgs("VISCOSITY", mue);
+  platform->options.getArgs("DENSITY", rho);
+  kernelInfo["defines/p_nu"] = mue / rho;
+  kernelInfo["defines/p_U0"] = P_U0;
+  kernelInfo["defines/p_V0"] = P_V0;
+  kernelInfo["defines/p_W0"] = P_W0;
+  kernelInfo["defines/p_A"] = P_A0 * M_PI;
+  kernelInfo["defines/p_D"] = P_D0 * M_PI;
+  kernelInfo["defines/p_amp"] = P_AMP;
+  kernelInfo["defines/p_omega"] = P_OMEGA;
+  kernelInfo["defines/p_pi"] = M_PI;
+
+  setupAide &options = platform->options;
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  platform->par->extract("casedata", "p_u0", P_U0);
+  platform->par->extract("casedata", "p_v0", P_V0);
+  platform->par->extract("casedata", "p_w0", P_W0);
+  platform->par->extract("casedata", "p_a0", P_A0);
+  platform->par->extract("casedata", "p_d0", P_D0);
+  platform->par->extract("casedata", "p_omega", P_OMEGA);
+  platform->par->extract("casedata", "p_amp", P_AMP);
+
+  // filter: for checking
+  platform->par->extract("casedata", "p_vel_filternc", p_filterNc_v);
+  platform->par->extract("casedata", "p_temp_filternc", p_filterNc_t);
+  platform->par->extract("casedata", "p_vel_filterwght", p_filterWght_v);
+  platform->par->extract("casedata", "p_temp_filterwght", p_filterWght_t);
+
+  if (platform->options.compareArgs("BUILD ONLY", "FALSE")) {
+    double *const nek_cb_scnrs = (double *)nek::ptr("cb_scnrs");
+    nek_cb_scnrs[0] = P_U0;
+    nek_cb_scnrs[1] = P_V0;
+    nek_cb_scnrs[2] = P_W0;
+    nek_cb_scnrs[3] = P_A0;
+    nek_cb_scnrs[4] = P_D0;
+    nek_cb_scnrs[5] = P_OMEGA;
+    nek_cb_scnrs[6] = P_AMP;
+
+    // filter: for checking
+    nek_cb_scnrs[7] = p_filterNc_v;
+    nek_cb_scnrs[8] = p_filterNc_t;
+    nek_cb_scnrs[9] = p_filterWght_v;
+    nek_cb_scnrs[10]= p_filterWght_t;
+  }
+}
+
+void UDF_Setup(nrs_t *nrs)
+{
+  cds_t *cds = nrs->cds;
+  nekFilter::setup("vel", nrs->meshV, p_filterNc_v, p_filterWght_v);
+  nekFilter::setup("temp", cds->mesh[0], p_filterNc_t, p_filterWght_t);
+}
+
+void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
+{
+
+  mesh_t *mesh = nrs->meshV;
+  cds_t *cds = nrs->cds;
+
+  if (tstep <= 5) {
+    exactUVWP(mesh->Nlocal, time, mesh->o_x, mesh->o_y, mesh->o_z, nrs->fieldOffset, nrs->o_P, nrs->o_U);
+    if (nrs->pSolver) {
+      ellipticZeroMean(nrs->pSolver, nrs->o_P);
+    }
+    if (nrs->Nscalar > 0) {
+      cds->o_S.copyFrom(nrs->o_U, mesh->Nlocal * sizeof(dfloat), 0 * cds->fieldOffset[0] * sizeof(dfloat));
+    }
+    if (nrs->Nscalar > 1) {
+      cds->o_S.copyFrom(nrs->o_U, mesh->Nlocal * sizeof(dfloat), 1 * cds->fieldOffset[0] * sizeof(dfloat));
+    }
+  }
+
+
+  if (nrs->isOutputStep) { // first call to copy solutions
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  } 
+      
+  { // apply explicit filter
+    auto o_UX = nrs->o_U + 0 * nrs->fieldOffset * sizeof(dfloat);
+    auto o_UY = nrs->o_U + 1 * nrs->fieldOffset * sizeof(dfloat); 
+    auto o_UZ = nrs->o_U + 2 * nrs->fieldOffset * sizeof(dfloat);
+  
+    nekFilter::apply("vel", o_UX);
+    nekFilter::apply("vel", o_UY);
+    nekFilter::apply("vel", o_UZ);
+    nekFilter::apply("vel", nrs->o_P);
+    
+    for (int is = 0; is < cds->NSfields; is++) {
+      if (!cds->compute[is] || cds->cvodeSolve[is]) {
+        continue;
+      }
+      auto o_Si = cds->o_S + cds->fieldOffsetScan[is] * sizeof(dfloat);
+      nekFilter::apply("temp", o_Si);
+    }
+  }
+
+  if (nrs->isOutputStep) { // second call for checking nek's filter
+    nek::ocopyToNek(time, tstep);
+    nek::userchk();
+  }
+
+}
