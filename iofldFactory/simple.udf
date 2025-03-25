@@ -1,0 +1,71 @@
+// copied from nrs.cpp
+void outfld_wrapper(nrs_t *nrs, std::unique_ptr<iofld> &checkpointWriter, const int N, double time, int tstep, std::string fileName)
+{ 
+  if (!checkpointWriter) {
+    checkpointWriter = iofldFactory::create("nek"); // or "adios"
+    if (platform->comm.mpiRank == 0) {
+      printf("create a new iofldFactory... %s\n", fileName.c_str());
+    }
+  }
+  
+  if (!checkpointWriter->isInitialized()) {
+    auto visMesh = (nrs->cht) ? nrs->cds->mesh[0] : nrs->mesh;
+    checkpointWriter->open(visMesh, iofld::mode::write, fileName);
+    
+    if (platform->options.compareArgs("LOWMACH", "TRUE")) {
+      checkpointWriter->addVariable("p0th", nrs->p0th[0]);
+    }
+    
+    if (platform->options.compareArgs("VELOCITY CHECKPOINTING", "TRUE")) {
+      std::vector<occa::memory> o_V;
+      for (int i = 0; i < visMesh->dim; i++) {
+        o_V.push_back(nrs->o_U.slice(i * nrs->fieldOffset, visMesh->Nlocal));
+      }
+      checkpointWriter->addVariable("velocity", o_V);
+    }
+    
+    if (platform->options.compareArgs("PRESSURE CHECKPOINTING", "TRUE")) {
+      auto o_p = std::vector<occa::memory>{nrs->o_P.slice(0, visMesh->Nlocal)};
+      checkpointWriter->addVariable("pressure", o_p);
+    }
+    
+    for (int i = 0; i < nrs->Nscalar; i++) {
+      if (platform->options.compareArgs("SCALAR" + scalarDigitStr(i) + " CHECKPOINTING", "TRUE")) {
+        const auto temperatureExists = platform->options.compareArgs("SCALAR00 IS TEMPERATURE", "TRUE");
+        std::vector<occa::memory> o_Si = {nrs->cds->o_S.slice(nrs->cds->fieldOffsetScan[i], visMesh->Nlocal)};
+        if (i == 0 && temperatureExists) {
+          checkpointWriter->addVariable("temperature", o_Si);
+        } else {
+          const auto is = (temperatureExists) ? i - 1 : i;
+          checkpointWriter->addVariable("scalar" + scalarDigitStr(is), o_Si);
+        }
+      }
+    }
+  }
+  
+  const auto outXYZ = platform->options.compareArgs("CHECKPOINT OUTPUT MESH", "TRUE");
+  const auto FP64 = platform->options.compareArgs("CHECKPOINT PRECISION", "FP64");
+  
+  checkpointWriter->writeAttribute("polynomialOrder", std::to_string(N));
+  checkpointWriter->writeAttribute("precision", (FP64) ? "64" : "32");
+  checkpointWriter->writeAttribute("uniform", "false");
+  checkpointWriter->writeAttribute("outputMesh", (outXYZ) ? "true" : "false");
+
+  checkpointWriter->addVariable("time", time);
+  
+  checkpointWriter->process();
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{   
+  static std::unique_ptr<iofld> iofld_N3;
+  static std::unique_ptr<iofld> iofld_N1;
+  if (nrs->checkpointStep) {
+    outfld_wrapper(nrs, iofld_N3, 3, time, tstep, "aaaN3");
+    outfld_wrapper(nrs, iofld_N1, 1, time, tstep, "aaaN1");
+    if (nrs->lastStep) {
+      iofld_N3->close();
+      iofld_N1->close();
+    }
+  }
+}
