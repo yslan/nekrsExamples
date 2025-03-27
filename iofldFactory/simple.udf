@@ -45,10 +45,11 @@ void outfld_wrapper(nrs_t *nrs, std::unique_ptr<iofld> &checkpointWriter, const 
   
   const auto outXYZ = platform->options.compareArgs("CHECKPOINT OUTPUT MESH", "TRUE");
   const auto FP64 = platform->options.compareArgs("CHECKPOINT PRECISION", "FP64");
+  const auto uniform = (N < 0) ? true : false;
   
-  checkpointWriter->writeAttribute("polynomialOrder", std::to_string(N));
+  checkpointWriter->writeAttribute("polynomialOrder", std::to_string(abs(N)));
   checkpointWriter->writeAttribute("precision", (FP64) ? "64" : "32");
-  checkpointWriter->writeAttribute("uniform", "false");
+  checkpointWriter->writeAttribute("uniform", (unifrom) ? "true" : "false");
   checkpointWriter->writeAttribute("outputMesh", (outXYZ) ? "true" : "false");
 
   checkpointWriter->addVariable("time", time);
@@ -59,13 +60,16 @@ void outfld_wrapper(nrs_t *nrs, std::unique_ptr<iofld> &checkpointWriter, const 
 void UDF_ExecuteStep(double time, int tstep)
 {   
   static std::unique_ptr<iofld> iofld_N3;
+  static std::unique_ptr<iofld> iofld_N2;
   static std::unique_ptr<iofld> iofld_N1;
   if (nrs->checkpointStep) {
     outfld_wrapper(nrs, iofld_N3, 3, time, tstep, "aaaN3");
+    outfld_wrapper(nrs, iofld_N2, -2, time, tstep, "aaaN2unif"); // minus = uniform
     outfld_wrapper(nrs, iofld_N1, 1, time, tstep, "aaaN1");
-    if (nrs->lastStep) {
-      iofld_N3->close();
-      iofld_N1->close();
-    }
+  }
+  if (nrs->lastStep) {
+    iofld_N3->close();
+    iofld_N2->close();
+    iofld_N1->close();
   }
 }
