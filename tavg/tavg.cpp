@@ -220,7 +220,7 @@ void tavg::setup(nrs_t *nrs) // avg_all
   tavg::setup(nrs->fieldOffset, tavgFields);
 }
 
-void tavg::outfld(mesh_t *mesh, bool reset_)
+void tavg::outfld(mesh_t *mesh, bool FP64, bool reset_)
 {
   nekrsCheck(!setupCalled || !buildKernelCalled,
              MPI_COMM_SELF,
@@ -245,7 +245,7 @@ void tavg::outfld(mesh_t *mesh, bool reset_)
 
       if (!iofld->isInitialized()) {
         iofld->open(mesh, iofld::mode::write, fileName);
-        iofld->writeAttribute("precision", "64");
+        iofld->writeAttribute("precision", (FP64) ? "64" : "32");
 
         std::vector<occa::memory> o_V;
         o_V.push_back(o_AVG.slice((idx+0)*fieldOffset, mesh->Nlocal));
@@ -292,7 +292,7 @@ void tavg::outfld(mesh_t *mesh, bool reset_)
     if (!fldWriter->isInitialized()) {
       fldWriter->open(mesh, iofld::mode::write, "tavg");
   
-      fldWriter->writeAttribute("precision", "64");
+      fldWriter->writeAttribute("precision", (FP64) ? "64" : "32");
    
       fldWriter->addVariable("time", atime);
    

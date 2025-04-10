@@ -18,7 +18,7 @@ void buildKernel(occa::properties kernelInfo);
 void run(double time);
 void setup(dlong fieldOffset, const std::vector< std::vector<deviceMemory<dfloat>> >& fields);
 void setup(nrs_t* nrs);
-void outfld(mesh_t *mesh, bool reset_ = true);
+void outfld(mesh_t *mesh, bool FP64 = true, bool reset_ = true);
 void reset();
 void free();
 deviceMemory<double> o_avg();

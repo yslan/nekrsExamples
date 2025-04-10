@@ -56,13 +56,19 @@ On the top of that, two features are added.
    tavgFields.push_back({o_w, o_u});
    ```
 
-2. Add "reset" to `tavg::outfld`.   
-   The default value is `true` which reset the `atime` everytime it dumpes a file.
+2. Add "FP64" and "reset" to `tavg::outfld(mesh, FP64 = true, reset = true)`.
+   The default values for both modes are `true` which dumps files in double precision and reset the `atime` everytime it dumpes a file.
    Now, it supports
    ```
    // default
    tavg::outfld(mesh);
 
-   // no-reset
-   tavg::outfld(mesh, false);
+   // FP64, no-reset
+   tavg::outfld(mesh, true, false);
+
+   // FP32, no-reset
+   tavg::outfld(mesh, false, false);
    ```
+
+   The reason for FP64 is, Paraview's new Nek5000 reader only supports single prevision. 
+   https://gitlab.kitware.com/paraview/paraview/-/issues/22747
