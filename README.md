@@ -31,3 +31,9 @@ Here we focus on porting Nek5000 functionality into NekRS
 
 - `hemi_elementFilter`
   detect CFL, only dump elelments aruond it using `elementFilter`
+
+- `iofldFactory`
+  A example of having extra iofldFactory.
+  
+- `tavg`
+  Extend support of tavg plugin to have Nek5000's `avg_all`
