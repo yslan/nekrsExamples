@@ -2,12 +2,16 @@
 
 - Version, NekRS v24pre (repo/next, cloned at Oct. 19)
 
-- Setup:
+- Setup:   
   Replace the following two files:
   ```
   nekrs/src/plugins/tavg.cpp
   nekrs/src/plugins/tavg.hpp
   ```
+
+- Future:  
+  This won't merge into nekrs repo soon because the nrs_t dependency.
+  Waiting for the next code refactor.
 
 ## Usage and Old Features
 
@@ -15,7 +19,7 @@ The NekRS's default still works (See turbPipe example).
 On the top of that, two features are added.
 
 
-1. Add auto setup for `avg_all`
+1. Add auto setup for `avg_all`.   
    Previously, user has to manually set something like this
    ```
    tavgFields.push_back({o_u});
@@ -56,7 +60,7 @@ On the top of that, two features are added.
    tavgFields.push_back({o_w, o_u});
    ```
 
-2. Add "FP64" and "reset" to `tavg::outfld(mesh, FP64 = true, reset = true)`.
+2. Add "FP64" and "reset" to `tavg::outfld(mesh, FP64 = true, reset = true)`.   
    The default values for both modes are `true` which dumps files in double precision and reset the `atime` everytime it dumpes a file.
    Now, it supports
    ```
@@ -70,5 +74,5 @@ On the top of that, two features are added.
    tavg::outfld(mesh, false, false);
    ```
 
-   The reason for FP64 is, Paraview's new Nek5000 reader only supports single prevision. 
+   The reason for FP32 is, Paraview's new Nek5000 reader only supports single prevision.   
    https://gitlab.kitware.com/paraview/paraview/-/issues/22747
