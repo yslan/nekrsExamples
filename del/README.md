@@ -55,7 +55,7 @@ Verifying and test derivaives operators in `opSEM::`
      $$f(x,y,z) = \exp(-x^2-y^2) * \sin(z)$$
 
    - Output:   
-     $$\nabla\cdot\left(a \nabla f)$$
+     $$\nabla\cdot\left(a \nabla f\right)$$
      where $a(x,y,z) = 1+z$
      Note that, there is no minus sign at front.
 
