@@ -37,3 +37,6 @@ Here we focus on porting Nek5000 functionality into NekRS
   
 - `tavg`
   Extend support of tavg plugin to have Nek5000's `avg_all`
+
+- `del`
+  Verify derivative operators in `opSEM::`

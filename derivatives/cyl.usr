@@ -1,0 +1,522 @@
+C-----------------------------------------------------------------------
+      subroutine uservp(ix,iy,iz,eg) ! set variable properties
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer e,f,eg
+c     e = gllel(eg)
+
+      udiff  = 0.0
+      utrans = 0.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userf(ix,iy,iz,eg) ! set acceleration term
+c
+c     Note: this is an acceleration term, NOT a force!
+c     Thus, ffx will subsequently be multiplied by rho(x,t).
+c
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer e,f,eg
+c     e = gllel(eg)
+
+      ffx = 0.0
+      ffy = 0.0
+      ffz = 0.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userq(ix,iy,iz,eg) ! set source term
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer e,f,eg
+c     e = gllel(eg)
+
+      qvol   = 0.0
+      source = 0.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userbc(ix,iy,iz,f,eg) ! set up boundary conditions
+
+c     NOTE: This routine may or may not be called by every processor
+
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+
+      integer e,f,eg
+
+      ux = 0.0
+      uy = 0.0
+      uz = 1.0
+      temp = 0.0
+      flux = 1.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine useric(ix,iy,iz,eg) ! set up initial conditions
+      include 'SIZE'
+      include 'TOTAL'
+      include 'NEKUSE'
+      integer e,eg
+
+      ux = 0.0
+      uy = 0.0
+      uz = 1.0
+      temp = 0.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userchk()
+      include 'SIZE'
+      include 'TOTAL'
+
+      if (istep.eq.0) call outpost(vx,vy,vz,pr,t,'msh')
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat()   ! This routine to modify element vertices
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat2()  ! This routine to modify mesh coordinates
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+
+      character*3 cb3
+      integer e,f,ierr,iglsum
+
+      call my_cbc_chk('aaa')
+
+c     call outpost(vx,vy,vz,pr,t,'aaa')
+      call project_mesh ! make sure grid points are on sphere and cylinder surface
+      call project_mesh ! make sure grid points are on sphere and cylinder surface
+c     call outpost(vx,vy,vz,pr,t,'bbb')
+
+      call test_opdiv
+      call test_volarea
+
+      ierr = 0
+      do e=1,nelt
+      do f=1,2*ldim
+         cb3 = cbc(f,e,1)
+         if (cb3.eq.'W  ') then ! sphere
+            cbc(f,e,1) = 'W  '
+            cbc(f,e,2) = 'f  '
+         elseif (cb3.eq.'W01') then ! inlet
+            cbc(f,e,1) = 'v  '
+            cbc(f,e,2) = 't  '
+         elseif (cb3.eq.'W02') then ! outlet
+            cbc(f,e,1) = 'O  '
+            cbc(f,e,2) = 'I  '
+         elseif (cb3.eq.'W03') then ! cylinder side
+            cbc(f,e,1) = 'W  '
+            cbc(f,e,2) = 'I  '
+         elseif (cb3.eq.'   '.OR.cb3.eq.'E  ') then
+            cbc(f,e,1) = 'E  '
+            cbc(f,e,2) = 'E  '
+         else
+            ierr = 1
+            write(*,*)'ERR: invalid bc',nid,lglel(e),f,cb3
+         endif
+      enddo
+      enddo
+      ierr = iglsum(ierr,1)
+      if (ierr.gt.0) call exitt
+
+      call my_cbc_chk('bbb')
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat3()
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine project_mesh
+c     sphere center = (0,0,0), cyl axis=(0,0,z)
+      implicit none
+      include 'SIZE'
+      include 'INPUT'
+      include 'GEOM'
+
+      integer lt
+      parameter (lt=lx1*ly1*lz1*lelt)
+      real xo(lt), yo(lt), zo(lt)
+
+      integer e, f, n, ix, iy, iz, kx1, kx2, ky1, ky2, kz1, kz2
+      real Rsph, Rcyl, Zin, Zout
+     $   , dif_sph, dif_cyl, dif_x, dif_y, dif_z, glamax, rr
+      character*3 cbc_sph, cbc_cyl, cbc_in, cbc_out
+
+      Rsph = 1.0
+      Rcyl = 4.4
+      Zin = -5.0
+      Zout = 10.0
+
+      cbc_sph = 'W  '
+      cbc_cyl = 'W03'
+      cbc_in = 'W01'
+      cbc_out = 'W02'
+
+      n = lx1*ly1*lz1*nelt 
+
+      call copy(xo,xm1,n)
+      call copy(yo,ym1,n)
+      call copy(zo,zm1,n)
+
+      dif_sph = 0.0
+      dif_cyl = 0.0
+      do e=1,nelt
+      do f=1,2*ldim
+        call facind(kx1,kx2,ky1,ky2,kz1,kz2,lx1,ly1,lz1,f)
+        if (cbc(f,e,1).eq.cbc_sph) then
+          do iz=kz1,kz2
+          do iy=ky1,ky2
+          do ix=kx1,kx2
+            rr = sqrt(xm1(ix,iy,iz,e)**2 + ym1(ix,iy,iz,e)**2 
+     $              + zm1(ix,iy,iz,e)**2)
+            xm1(ix,iy,iz,e) = xm1(ix,iy,iz,e) * Rsph / rr
+            ym1(ix,iy,iz,e) = ym1(ix,iy,iz,e) * Rsph / rr
+            zm1(ix,iy,iz,e) = zm1(ix,iy,iz,e) * Rsph / rr
+            dif_sph = max(dif_sph, abs(rr-Rsph))
+          enddo
+          enddo
+          enddo
+        elseif (cbc(f,e,1).eq.cbc_cyl) then
+          do iz=kz1,kz2
+          do iy=ky1,ky2
+          do ix=kx1,kx2
+            rr = sqrt(xm1(ix,iy,iz,e)**2 + ym1(ix,iy,iz,e)**2)
+            xm1(ix,iy,iz,e) = xm1(ix,iy,iz,e) * Rcyl / rr
+            ym1(ix,iy,iz,e) = ym1(ix,iy,iz,e) * Rcyl / rr
+            dif_cyl = max(dif_cyl, abs(rr-Rcyl))
+          enddo
+          enddo
+          enddo
+        elseif (cbc(f,e,1).eq.cbc_in) then
+          do iz=kz1,kz2
+          do iy=ky1,ky2
+          do ix=kx1,kx2
+            zm1(ix,iy,iz,e) = Zin
+          enddo
+          enddo
+          enddo
+        elseif (cbc(f,e,1).eq.cbc_out) then
+          do iz=kz1,kz2
+          do iy=ky1,ky2
+          do ix=kx1,kx2
+            zm1(ix,iy,iz,e) = Zout
+          enddo
+          enddo
+          enddo
+        endif
+      enddo
+      enddo
+
+      call sub2(xo,xm1,n)
+      call sub2(yo,ym1,n)
+      call sub2(zo,zm1,n)
+
+      dif_sph = glamax(dif_sph,1)
+      dif_cyl = glamax(dif_cyl,1)
+      dif_x = glamax(xo,n)
+      dif_y = glamax(yo,n)
+      dif_z = glamax(zo,n)
+
+      call fix_geom
+
+      if (nio.eq.0) then
+         write(*,90) lx1,dif_sph,dif_cyl,dif_x,dif_y,dif_z
+      endif
+   90 format('reproj lx1= ',i3,' diff (s,c,x,y,z) ',1p5e13.5)
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine my_opdiv(ud,u1,u2,u3)
+      include 'SIZE'
+      include 'DXYZ'
+      include 'GEOM'
+      include 'INPUT'
+      include 'TSTEP'
+
+      parameter (lxyz=lx1*ly1*lz1)
+      real ud(lxyz,1),u1(lxyz,1),u2(lxyz,1),u3(lxyz,1)
+
+      common /ctmp1/ ur(lxyz),us(lxyz),ut(lxyz)
+      integer e, N
+
+      if (ldim.ne.3) call exitti('my_opdiv is for 3D$',ldim)
+
+      call rzero(ud,lx1*ly1*lz1*nelt)
+
+      N = lx1-1
+      do e=1,nelt
+        call local_grad3(ur,us,ut,u1,N,e,dxm1,dxtm1)
+        do i=1,lxyz
+          ud(i,e) = ud(i,e)
+     $            + jacmi(i,e)*(ur(i)*rxm1(i,1,1,e)
+     $                        + us(i)*sxm1(i,1,1,e)
+     $                        + ut(i)*txm1(i,1,1,e) )
+        enddo
+
+        call local_grad3(ur,us,ut,u2,N,e,dxm1,dxtm1)
+        do i=1,lxyz
+          ud(i,e) = ud(i,e)
+     $            + jacmi(i,e)*(ur(i)*rym1(i,1,1,e)
+     $                        + us(i)*sym1(i,1,1,e)
+     $                        + ut(i)*tym1(i,1,1,e) )
+        enddo
+
+        call local_grad3(ur,us,ut,u3,N,e,dxm1,dxtm1)
+        do i=1,lxyz
+          ud(i,e) = ud(i,e)
+     $            + jacmi(i,e)*(ur(i)*rzm1(i,1,1,e)
+     $                        + us(i)*szm1(i,1,1,e)
+     $                        + ut(i)*tzm1(i,1,1,e) )
+        enddo
+
+      enddo
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine test_opdiv
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+      integer lt,i,n
+      parameter (lt=lx1*ly1*lz1*lelt)
+      real ubase(lt,3), udiv(lt), utmp(lt)
+      real x,y,z, glamax, gl2norm, err, m1,m2,m3
+
+      n = lx1*ly1*lz1*nelt
+
+      do i=1,n
+         x = xm1(i,1,1,1)
+         y = ym1(i,1,1,1)
+         z = zm1(i,1,1,1)
+         ubase(i, 1) = x * x * sin(y)
+         ubase(i, 2) = y * cos(z)
+         ubase(i, 3) = exp(x) * sin(z)
+         udiv(i) = 2.0*x*sin(y) + cos(z) + exp(x)*cos(z)
+      enddo
+      m1 = glamax(ubase(1,1),n)
+      m2 = glamax(ubase(1,2),n)
+      m3 = glamax(ubase(1,3),n)
+
+      call opdiv(utmp, ubase(1,1), ubase(1,2), ubase(1,3))
+      call dssum(utmp, lx1,ly1,lz1)
+      call col2(utmp, binvm1,n)
+      call sub2(utmp, udiv,n)
+
+      err = gl2norm(utmp,n) / gl2norm(udiv,n)
+      if (nio.eq.0) write(*,21) lx1-1, err, m1,m2,m3
+
+      call my_opdiv(utmp, ubase(1,1), ubase(1,2), ubase(1,3))
+      call sub2(utmp, udiv,n)
+      err = gl2norm(utmp,n) / gl2norm(udiv,n)
+      if (nio.eq.0) write(*,21) lx1-1, err, m1,m2,m3
+
+   21 format('div chk N= ',i2' err=',1p1e15.8,' mag=',1p3e15.8,'(5k)')
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine test_volarea
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+      integer e, f, n
+      real glsum, glmax, glmin, vlsum, zlen, Rsph, Rcyl
+     $   , vol, err, err_sph, err_cyl, err_zmin, err_zmax
+     $   , aa, area_sph, area_cyl, area_zmin, area_zmax
+      character*3 cbc_sph, cbc_cyl, cbc_zmin, cbc_zmax
+      
+      Rsph = 1.0
+      Rcyl = 4.4
+      
+      cbc_sph = 'W  '
+      cbc_cyl = 'W03'
+      cbc_zmin = 'W01'
+      cbc_zmax = 'W02'
+
+      n = lx1*ly1*lz1*nelt
+
+      zlen = glmax(zm1,n) - glmin(zm1,n)
+      vol = zlen * pi * Rcyl**2 - 4.0/3.0 * pi * Rsph**3
+      err = abs(volvm1 - vol) / vol;
+      if (nio.eq.0) write(*,22) lx1-1, err
+   22 format('vol chk N= ',i2' err= ',1p1e15.8,' (5k)') 
+
+      area_sph = 0.0
+      area_cyl = 0.0
+      area_zmin = 0.0
+      area_zmax = 0.0
+      do e=1,nelt
+      do f=1,2*ldim
+        aa = vlsum(area(1,1,f,e),lx1*lz1)
+        if (cbc(f,e,1).eq.cbc_sph) area_sph = area_sph + aa
+        if (cbc(f,e,1).eq.cbc_cyl) area_cyl = area_cyl + aa
+        if (cbc(f,e,1).eq.cbc_zmin) area_zmin = area_zmin + aa
+        if (cbc(f,e,1).eq.cbc_zmax) area_zmax = area_zmax + aa
+      enddo
+      enddo
+      area_sph = glsum(area_sph,1)
+      area_cyl = glsum(area_cyl,1)
+      area_zmin = glsum(area_zmin,1)
+      area_zmax = glsum(area_zmax,1)
+
+      err_sph = abs(area_sph - 4.0*pi * Rsph**2) / (4.0*pi * Rsph**2)
+      err_cyl = abs(area_cyl - 2.0*pi*Rcyl*zlen) / (2.0*pi*Rcyl*zlen)
+      err_zmin = abs(area_zmin - pi * Rcyl**2) / (pi * Rcyl**2)
+      err_zmax = abs(area_zmax - pi * Rcyl**2) / (pi * Rcyl**2)
+
+      if (nio.eq.0) 
+     $  write(*,23) lx1-1, err_sph, err_cyl, err_zmin, err_zmax
+   23 format('area chk N= ',i2' errs= ',1p4e15.8,' (5k)') 
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine my_cbc_chk(s3)
+c     This print types of current BC, counting as well
+      implicit none
+      include 'SIZE'
+      include 'TOTAL'
+
+      integer ncbc,lcbc,i,j,e,f,inid,mtype,idummy,ncbc_tmp,ifld,nel
+     $      , nfldt
+      parameter (lcbc=10) ! max # unique CBC
+      integer cbc_count(lcbc),cbc_count_tmp(lcbc)
+      character*3 cbc_list(lcbc),cbc_list_tmp(lcbc),cbc3,s3,tag3
+      character*2 s2tmp
+      logical cbc_in_list
+
+      nfldt = nfield
+      if (ifmhd) nfldt = ifldmhd   ! mhd always uses nscal+3, with or without temperature
+
+      do ifld=0,nfldt
+
+        if (ifld.eq.0) then
+          tag3='PR '
+          nel = nelv
+        elseif (ifld.eq.1) then
+          tag3='VEL'
+          nel = nelv
+        elseif (ifmhd.AND.ifld.eq.ifldmhd) then
+          tag3='MHD'
+          nel = nelv
+        elseif (ifld.gt.1) then
+          write(s2tmp,'(I2.2)') ifld-2
+          tag3='S'//s2tmp
+          nel = nelt
+        endif
+
+        call izero(cbc_count,lcbc)
+
+        ncbc = 1                 ! # unique CBC
+        cbc_list(1) = 'E  ' ! internal BC
+
+        do e=1,nel
+        do f=1,2*ldim
+          cbc3 = cbc(f,e,ifld)
+          cbc_in_list = .false.
+
+          if (cbc3.eq.'E  '.or.cbc3.eq.'   ') then
+            cbc_count(1) = cbc_count(1) + 1
+            cbc_in_list = .true.
+          else
+            do i=2,ncbc ! go throught the registered CBC
+              if (cbc3.eq.cbc_list(i)) then
+                cbc_count(i) = cbc_count(i) + 1
+                cbc_in_list = .true.
+              endif
+            enddo
+          endif
+          if (.not.cbc_in_list) then
+            ncbc = ncbc + 1
+            if (ncbc.gt.lcbc)
+     $        call exitti('BCchk: Increase lcbc$',ncbc)
+
+            cbc_list(ncbc) = cbc3
+            cbc_count(ncbc) = 1
+          endif
+        enddo
+        enddo
+
+        call nekgsync()
+
+        ! All reduce to nid=0
+        if (nid.eq.0) then
+          do inid=1,np-1
+            mtype = inid
+            call csend(mtype,idummy,4,inid,0) ! handshake
+
+            call crecv(mtype,ncbc_tmp,4)
+            call crecv(mtype,cbc_list_tmp(1),3*ncbc_tmp,0,0)
+            call crecv(mtype,cbc_count_tmp(1),4*ncbc_tmp,0,0)
+
+            cbc_count(1) = cbc_count(1)+cbc_count_tmp(1)
+            do j=2,ncbc_tmp
+              cbc_in_list = .false.
+              do i=2,ncbc
+                if (cbc_list(i).eq.cbc_list_tmp(j)) then
+                  cbc_count(i) = cbc_count(i) + cbc_count_tmp(j)
+                  cbc_in_list = .true.
+                endif
+              enddo
+              if (.not.cbc_in_list) then
+                ncbc = ncbc + 1
+                if (ncbc.gt.lcbc)
+     $            call exitti('BCchk: Increase lcbc$',ncbc)
+
+                cbc_list(ncbc) = cbc_list_tmp(j)
+                cbc_count(ncbc) = cbc_count_tmp(j)
+              endif
+            enddo
+          enddo
+        else
+          mtype = nid
+          call crecv(mtype,idummy,4) ! ! handshake
+
+          call csend(mtype,ncbc,4,0,0)
+          call csend(mtype,cbc_list,3*ncbc,0,0)
+          call csend(mtype,cbc_count,4*ncbc,0,0)
+        endif
+
+        call nekgsync()
+
+        ! print
+        if (nid.eq.0) then
+          do i=1,ncbc
+            write(6,41) s3,ifld,tag3,cbc_list(i),cbc_count(i)
+          enddo
+        endif
+
+      enddo ! ifld
+
+   41 format(a3,' BC: 'i3,' ',a3,a5,i10)
+
+      return
+      end
+c-----------------------------------------------------------------------

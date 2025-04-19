@@ -1,0 +1,209 @@
+#ifdef __okl__
+
+// Boundary conditions
+void codedFixedValueVelocity(bcData *bc)
+{
+  bc->u = 0.0;
+  bc->v = 0.0;
+  bc->w = 1.0;
+}
+
+// Stabilized outflow (Dong et al)
+void codedFixedValuePressure(bcData *bc)
+{
+  const dfloat iU0delta = 20.0;
+  const dfloat un = bc->u * bc->nx + bc->v * bc->ny + bc->w * bc->nz;
+  const dfloat s0 = 0.5 * (1.0 - tanh(un * iU0delta));
+  bc->p = -0.5 * (bc->u * bc->u + bc->v * bc->v + bc->w * bc->w) * s0;
+}
+
+void codedFixedValueScalar(bcData *bc)
+{
+  bc->s = 0.0;
+}
+
+void codedFixedGradientScalar(bcData *bc)
+{
+  bc->flux = 1.0;
+}
+
+#endif
+
+void UDF_Setup() 
+{
+  auto mesh = nrs->mesh;
+
+  { // volume check
+    dfloat Rsph = 1.0;
+    dfloat Rcyl = 4.4;
+    dfloat zmin = platform->linAlg->min(mesh->Nlocal, mesh->o_z, platform->comm.mpiComm);
+    dfloat zmax = platform->linAlg->max(mesh->Nlocal, mesh->o_z, platform->comm.mpiComm);
+    dfloat zLength = zmax - zmin;
+    dfloat vol = zLength * M_PI * pow(Rcyl,2) - 4.0/3.0 * M_PI * pow(Rsph,3);
+    dfloat err = abs(vol - mesh->volume) / vol;
+    if (platform->comm.mpiRank == 0) {
+      printf("vol chk N= %d err= %.8e\n", mesh->Nq-1, err);
+    }
+  }
+
+  auto o_U = platform->deviceMemoryPool.reserve<dfloat>(mesh->dim * nrs->fieldOffset);
+  auto o_S = platform->deviceMemoryPool.reserve<dfloat>(nrs->fieldOffset);
+  auto o_div = platform->deviceMemoryPool.reserve<dfloat>(nrs->fieldOffset);
+  auto o_grad = platform->deviceMemoryPool.reserve<dfloat>(mesh->dim * nrs->fieldOffset);
+  auto o_lambda = platform->deviceMemoryPool.reserve<dfloat>(nrs->fieldOffset);
+  auto o_lap = platform->deviceMemoryPool.reserve<dfloat>(nrs->fieldOffset);
+
+  { // set up exact solutions
+    std::vector<dfloat> U(mesh->dim * nrs->fieldOffset, 0.0);
+    std::vector<dfloat> div(nrs->fieldOffset, 0.0);
+    std::vector<dfloat> S(nrs->fieldOffset, 0.0);
+    std::vector<dfloat> grad(mesh->dim * nrs->fieldOffset, 0.0);
+    std::vector<dfloat> lap(nrs->fieldOffset, 0.0);
+    std::vector<dfloat> lambda(nrs->fieldOffset, 0.0);
+
+    auto [xm, ym, zm] = mesh->xyzHost();
+    for (int n = 0; n < mesh->Nlocal; n++) {
+       const dfloat x = xm[n];
+       const dfloat y = ym[n];
+       const dfloat z = zm[n];
+       U[n + 0 * nrs->fieldOffset] = x*x*sin(y);
+       U[n + 1 * nrs->fieldOffset] = y*cos(z);
+       U[n + 2 * nrs->fieldOffset] = exp(x)*sin(z);
+       div[n] = 2.0*x*sin(y) + cos(z) + exp(x)*cos(z);
+
+       const dfloat r2 = pow(x,2) + pow(y,2);
+       const dfloat e2 = exp(-r2);
+       S[n] = e2 * sin(z);
+       grad[n + 0 * nrs->fieldOffset] = -2.0*x*e2*sin(z);
+       grad[n + 1 * nrs->fieldOffset] = -2.0*y*e2*sin(z);
+       grad[n + 2 * nrs->fieldOffset] = e2*cos(z);
+       lambda[n] = 1.0 + z;
+       lap[n] = e2 * ((1.0+z)*(4.0*r2-5.0)*sin(z) + cos(z));
+    }
+    o_U.copyFrom(U.data(), mesh->dim * nrs->fieldOffset);
+    o_div.copyFrom(div.data(), nrs->fieldOffset);
+
+    o_S.copyFrom(S.data(), nrs->fieldOffset);
+    o_grad.copyFrom(grad.data(), mesh->dim * nrs->fieldOffset);
+    o_lambda.copyFrom(lambda.data(), nrs->fieldOffset);
+    o_lap.copyFrom(lap.data(), nrs->fieldOffset);
+  }
+
+  auto compRelErr = [&](auto o_u, auto o_ref, dfloat &err1, dfloat &err2){
+    static poolDeviceMemory<dfloat> o_dif;
+    if (!o_dif.isInitialized()) {
+      o_dif.resize(nrs->fieldOffset);
+    }
+    dfloat ref1, ref2;
+    platform->linAlg->axpbyz(mesh->Nlocal, -1.0, o_u, 1.0, o_ref, o_dif);
+    ref1 = platform->linAlg->amax(mesh->Nlocal, o_ref, platform->comm.mpiComm);
+    err1 = platform->linAlg->amax(mesh->Nlocal, o_dif, platform->comm.mpiComm);
+    err1 /= ref1;
+    ref2 = platform->linAlg->weightedNorm2(mesh->Nlocal, mesh->o_Jw, o_ref, platform->comm.mpiComm) / sqrt(mesh->volume);
+    err2 = platform->linAlg->weightedNorm2(mesh->Nlocal, mesh->o_Jw, o_dif, platform->comm.mpiComm) / sqrt(mesh->volume);
+    err2 /= ref2;
+  };
+
+  auto compRelErrVec = [&](auto o_u, auto o_ref, dfloat &err1, dfloat &err2){
+    static poolDeviceMemory<dfloat> o_dif;
+    if (!o_dif.isInitialized()) {
+      o_dif.resize(mesh->dim * nrs->fieldOffset);
+    }
+    const dlong offset = nrs->fieldOffset;
+    const dlong d = mesh->dim;
+    const dlong N = mesh->Nlocal;
+    dfloat ref1, ref2;
+    platform->linAlg->axpbyz(d * offset, -1.0, o_u, 1.0, o_ref, o_dif);
+    ref1 = platform->linAlg->amaxMany(N, d, offset, o_ref, platform->comm.mpiComm);
+    err1 = platform->linAlg->amaxMany(N, d, offset, o_dif, platform->comm.mpiComm);
+    err1 /= ref1;
+    ref2 = platform->linAlg->weightedNorm2Many(N, d, offset, mesh->o_Jw, o_ref, platform->comm.mpiComm) / sqrt(mesh->volume);
+    err2 = platform->linAlg->weightedNorm2Many(N, d, offset, mesh->o_Jw, o_dif, platform->comm.mpiComm) / sqrt(mesh->volume);
+    err2 /= ref2;
+  };
+
+  static poolDeviceMemory<dfloat> o_invLMM; // unassembled version
+  if (!o_invLMM.isInitialized()) {
+    o_invLMM.resize(mesh->fieldOffset);
+    platform->linAlg->adyz(mesh->Nlocal, 1.0, mesh->o_Jw, o_invLMM);
+  } 
+
+  auto o_tdiv = platform->deviceMemoryPool.reserve<dfloat>(nrs->fieldOffset);
+  auto o_tgrad = platform->deviceMemoryPool.reserve<dfloat>(mesh->dim * nrs->fieldOffset);
+  auto o_tlap = platform->deviceMemoryPool.reserve<dfloat>(nrs->fieldOffset);
+
+  dfloat err1, err2;
+
+  // div
+  opSEM::strongDivergence(mesh, nrs->fieldOffset, o_U, o_tdiv);
+//auto o_tdiv = opSEM::strongDivergence(mesh, nrs->fieldOffset, o_U); // FIXME bug
+  oogs::startFinish(o_tdiv, 1, nrs->fieldOffset, ogsDfloat, ogsAdd, nrs->gsh);
+  platform->linAlg->axmy(mesh->Nlocal, 1.0, mesh->o_invAJw, o_tdiv);
+
+  compRelErr(o_tdiv, o_div, err1, err2);
+  if (platform->comm.mpiRank == 0) {
+    printf("div chk N= %d err (inf,L2) = %.8e %.8e\n", mesh->Nq-1, err1, err2);
+  }
+
+  // grad
+  opSEM::strongGrad(mesh, nrs->fieldOffset, o_S, o_tgrad);
+  oogs::startFinish(o_tgrad, mesh->dim, nrs->fieldOffset, ogsDfloat, ogsAdd, nrs->gsh);
+  platform->linAlg->axmyVector(mesh->Nlocal, nrs->fieldOffset, 0, 1.0, mesh->o_invAJw, o_tgrad);
+
+  compRelErr(o_tgrad, o_grad, err1, err2);
+  if (platform->comm.mpiRank == 0) {
+    printf("grad chk N= %d err (inf,L2) = %.8e %.8e\n", mesh->Nq-1, err1, err2);
+  }
+  
+  // div ( lambda grad o_S)
+//opSEM::strongLaplacian(mesh, nrs->fieldOffset, o_lambda, o_S, o_tlap); // FIXME bug
+  auto strongLaplacian = [](mesh_t *mesh,
+                            dlong offset,
+                            const occa::memory &o_h, 
+                            const occa::memory &o_in,
+                            occa::memory &o_out)
+  {
+    auto o_tmp3 = platform->deviceMemoryPool.reserve<dfloat>(mesh->dim * offset);
+    opSEM::strongGrad(mesh, offset, o_in, o_tmp3);
+    oogs::startFinish(o_tmp3, mesh->dim, offset, ogsDfloat, ogsAdd, mesh->oogs);
+
+    auto o_tmp1 = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
+    platform->linAlg->axmyz(mesh->Nlocal, 1.0, mesh->o_invAJw, o_h, o_tmp1);
+    platform->linAlg->axmyVector(mesh->Nlocal, offset, 0, 1.0, o_tmp1, o_tmp3);
+    opSEM::strongDivergence(mesh, offset, o_tmp3, o_out);
+  };
+  strongLaplacian(mesh, nrs->fieldOffset, o_lambda, o_S, o_tlap);
+  oogs::startFinish(o_tlap, 1, nrs->fieldOffset, ogsDfloat, ogsAdd, nrs->gsh);
+  platform->linAlg->axmy(mesh->Nlocal, 1.0, mesh->o_invAJw, o_tlap); 
+  compRelErr(o_tlap, o_lap, err1, err2);
+  if (platform->comm.mpiRank == 0) {
+    printf("lap chk N= %d err (inf,L2) = %.8e %.8e\n", mesh->Nq-1, err1, err2);
+  }
+
+  auto myLaplacian = [](mesh_t *mesh,
+                        dlong offset,
+                        const occa::memory &o_invLMM, // unassembed version
+                        const occa::memory &o_h, 
+                        const occa::memory &o_in,
+                        occa::memory &o_out)
+  {
+    auto o_tmp3 = platform->deviceMemoryPool.reserve<dfloat>(mesh->dim * offset);
+    opSEM::strongGrad(mesh, offset, o_in, o_tmp3);
+
+    auto o_tmp1 = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
+    platform->linAlg->axmyz(mesh->Nlocal, 1.0, o_invLMM, o_h, o_tmp1);
+
+    platform->linAlg->axmyVector(mesh->Nlocal, offset, 0, 1.0, o_tmp1, o_tmp3);
+    opSEM::strongDivergence(mesh, offset, o_tmp3, o_out);
+    platform->linAlg->axmy(mesh->Nlocal, 1.0, o_invLMM, o_out); 
+  };
+  myLaplacian(mesh, nrs->fieldOffset, o_invLMM, o_lambda, o_S, o_tlap);
+  compRelErr(o_tlap, o_lap, err1, err2);
+  if (platform->comm.mpiRank == 0) {
+    printf("lap chk N= %d err (inf,L2) = %.8e %.8e\n", mesh->Nq-1, err1, err2);
+  }
+}
+
+void UDF_ExecuteStep(double time, int tstep) 
+{
+}
