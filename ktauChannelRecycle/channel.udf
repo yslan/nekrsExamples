@@ -1,0 +1,198 @@
+//
+// nekRS User Defined File
+//
+#include "udf.hpp"
+#include "plugins/RANSktau.hpp"
+#include "plugins/velRecycling.hpp"
+
+static dfloat rho, mueLam;
+
+#ifdef __okl__
+
+#include "channel.oudf"
+
+#endif
+
+void extractLine(nrs_t *nrs, double time, int tstep)
+{
+  const auto np = (platform->comm.mpiRank == 0) ? 200 : 0;
+  const auto offset = np;
+
+  static pointInterpolation_t *interpolator = nullptr;
+  static std::vector<dfloat> xp, yp, zp;
+  static occa::memory o_Up;
+
+  if (!interpolator) {
+    auto mesh = nrs->meshV;
+    const auto yMin = platform->linAlg->min(mesh->Nlocal, mesh->o_y, platform->comm.mpiComm);
+    const auto yMax = platform->linAlg->max(mesh->Nlocal, mesh->o_y, platform->comm.mpiComm);
+
+    if (np) {
+      const auto x0 = 7.0;
+      const auto z0 = 0.5;
+
+      xp.push_back(x0);
+      yp.push_back(yMin);
+      zp.push_back(z0);
+
+      const auto betaY = 2.2;
+      const auto dy = (yMax - yMin) / (np - 1);
+      for (int i = 1; i < np - 1; i++) {
+        xp.push_back(x0);
+        yp.push_back(tanh(betaY * (i * dy - 1)) / tanh(betaY));
+        zp.push_back(z0);
+      }
+
+      xp.push_back(x0);
+      yp.push_back(yMax);
+      zp.push_back(z0);
+      o_Up = platform->device.malloc<dfloat>(nrs->NVfields * offset);
+    }
+
+    interpolator = new pointInterpolation_t(nrs);
+    interpolator->setPoints(np, xp.data(), yp.data(), zp.data());
+    interpolator->find();
+  }
+
+  interpolator->eval(nrs->NVfields, nrs->fieldOffset, nrs->o_U, offset, o_Up);
+
+  if (platform->comm.mpiRank == 0) {
+    std::vector<dfloat> Up(nrs->NVfields * np);
+    o_Up.copyTo(Up.data());
+
+    std::ofstream f("profile.dat", std::ios::app);
+    for (int i = 0; i < np; i++) {
+      f << std::scientific << time << " " << xp[i] << " " << yp[i] << " " << zp[i] << " "
+        << Up[i + 0 * offset] << " " << Up[i + 1 * offset] << " " << Up[i + 2 * offset] << std::endl;
+    }
+    f.close();
+  }
+}
+
+void testErrors(nrs_t *nrs, double time, int tstep)
+{   
+  mesh_t *mesh = nrs->meshV;
+
+  std::vector<int> bidWall = {3}; // wall
+  occa::memory o_bidWall = platform->device.malloc<int>(bidWall.size(), bidWall.data());
+  
+  auto o_Sij = platform->o_memPool.reserve<dfloat>(2 * nrs->NVfields * nrs->fieldOffset);
+  postProcessing::strainRate(nrs, true, nrs->o_U, o_Sij);
+    
+  const auto drag = postProcessing::viscousDrag(nrs, bidWall.size(), o_bidWall, o_Sij);
+  o_Sij.free();
+
+  auto o_tmp = platform->o_memPool.reserve<dfloat>(mesh->Nlocal);
+  platform->linAlg->fill(mesh->Nlocal, 1.0, o_tmp);
+  const auto areaWall = mesh->surfaceIntegral(bidWall.size(), o_bidWall, o_tmp);
+
+  // https://turbulence.oden.utexas.edu/channel2015/data/LM_Channel_2000_mean_prof.dat
+  const auto utauRef = 4.58794e-02;
+  const auto utau = sqrt(drag / areaWall.at(0));
+  const auto utauErr = std::abs((utau - utauRef) / utauRef);
+    
+  if (platform->comm.mpiRank == 0) {
+    printf("%d time: %2.6e   tau: %g; relative error = %g\n", tstep, time, utau, utauErr);
+  }
+}
+
+void userq(nrs_t *nrs, double time, occa::memory o_S, occa::memory o_FS)
+{
+  mesh_t *mesh = nrs->meshV;
+  cds_t *cds = nrs->cds;
+
+  RANSktau::updateSourceTerms();
+}
+
+void uservp(nrs_t *nrs,
+            double time,
+            occa::memory o_U,
+            occa::memory o_S,
+            occa::memory o_UProp,
+            occa::memory o_SProp)
+{
+  mesh_t *mesh = nrs->meshV;
+  cds_t *cds = nrs->cds;
+
+  RANSktau::updateProperties();
+
+  dfloat conductivity;
+  platform->options.getArgs("SCALAR00 DIFFUSIVITY", conductivity);
+  const dfloat Pr_t = 0.7;
+  occa::memory o_mue_t = RANSktau::o_mue_t();
+  occa::memory o_temp_mue = cds->o_diff + 0 * cds->fieldOffset[0];
+  scalarScaledAdd(mesh->Nlocal, conductivity, 1 / Pr_t, o_mue_t, o_temp_mue);
+}
+
+void UDF_LoadKernels(occa::properties& kernelInfo)
+{
+#if 0
+  {
+    auto props = kernelInfo;
+    props["defines/p_sigma_k"] = 0.6;
+    RANSktau::buildKernel(props);
+  }
+#endif
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+}
+
+void UDF_Setup(nrs_t *nrs)
+{
+  mesh_t *mesh = nrs->meshV;
+  cds_t *cds = nrs->cds;
+
+  udf.properties = &uservp;
+  udf.sEqnSource = &userq;
+
+  const int scalarFieldStart = 1;
+  platform->options.getArgs("VISCOSITY", mueLam);
+  platform->options.getArgs("DENSITY", rho);
+
+  RANSktau::setup(nrs, mueLam, rho, scalarFieldStart);
+
+  { // velocity recycling
+    auto xLen = abs( 
+                platform->linAlg->max(mesh->Nlocal, mesh->o_x, platform->comm.mpiComm) -
+                platform->linAlg->min(mesh->Nlocal, mesh->o_x, platform->comm.mpiComm)
+              );
+
+    int nfld = nrs->NVfields + nrs->Nscalar;
+    nrs->o_usrwrk = platform->device.malloc<dfloat>(nfld * nrs->fieldOffset);
+
+    const dfloat uBulk = 1.0; // flow rate
+    const int bID = 1; // inlet bc id
+    dfloat xRecycLayer = 0.25 * xLen; // recycling shift
+    velRecycling::setup(nrs, nrs->o_usrwrk, xRecycLayer, 0.0, 0.0, bID, uBulk);
+  }
+}
+
+void UDF_ExecuteStep(nrs_t *nrs, double time, int tstep)
+{
+
+  velRecycling::copy();
+
+  { // recycle k and tau
+    const int kid = 1; // scalar id for k
+    const int tid = 2; // scalar id for tau
+    auto o_wrk_k = nrs->o_usrwrk.slice( (nrs->NVfields + kid) * nrs->fieldOffset, nrs->fieldOffset);
+    auto o_wrk_t = nrs->o_usrwrk.slice( (nrs->NVfields + tid) * nrs->fieldOffset, nrs->fieldOffset);
+
+    auto o_k   = nrs->cds->o_S.slice(kid * nrs->fieldOffset, nrs->fieldOffset);
+    auto o_tau = nrs->cds->o_S.slice(tid * nrs->fieldOffset, nrs->fieldOffset);
+
+    velRecycling::copy_scalar(nrs, o_wrk_k, o_k);
+    velRecycling::copy_scalar(nrs, o_wrk_t, o_tau);
+  }
+
+  if (tstep % 100 == 0) {
+    testErrors(nrs, time, tstep);
+  }
+
+//  if (nrs->lastStep) {// bug?
+  if (time + 1e-8 >= 50.0) {
+    extractLine(nrs, time, tstep);
+  }
+}

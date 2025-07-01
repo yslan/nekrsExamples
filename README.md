@@ -8,6 +8,8 @@ Here we focus on porting Nek5000 functionality into NekRS
 - turbInflow        
   recycle velocity using findpt     
 
+  See also `ktauChannelRecycle` for v23-next.
+
 - airfoil      
   compute drag coefficient, match nek5000's `torque_calc`
 
@@ -40,3 +42,5 @@ Here we focus on porting Nek5000 functionality into NekRS
 
 - `del`
   Verify derivative operators in `opSEM::`
+
+- `ktauChannelRecycle` = recycle + k-tau
