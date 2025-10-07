@@ -49,7 +49,7 @@ void outfld_wrapper(nrs_t *nrs, std::unique_ptr<iofld> &checkpointWriter, const 
   
   checkpointWriter->writeAttribute("polynomialOrder", std::to_string(abs(N)));
   checkpointWriter->writeAttribute("precision", (FP64) ? "64" : "32");
-  checkpointWriter->writeAttribute("uniform", (unifrom) ? "true" : "false");
+  checkpointWriter->writeAttribute("uniform", (uniform) ? "true" : "false");
   checkpointWriter->writeAttribute("outputMesh", (outXYZ) ? "true" : "false");
 
   checkpointWriter->addVariable("time", time);
