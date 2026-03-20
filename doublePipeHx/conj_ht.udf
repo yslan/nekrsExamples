@@ -1,0 +1,427 @@
+#include "planarCopy.hpp"
+
+static int updateProperties = 1;
+
+std::vector<int> eTag;
+dfloat u_inner, u_outer, t_inner, t_outer, r_max, r_scale;
+
+// to check stdy
+occa::memory o_solutionPrev;
+
+// recycling
+struct RecyclingData {
+  int bID = -1;
+  deviceMemory<int> o_bID;
+  dfloat area = 0.0;
+  std::vector<dfloat> normal; // outward
+  planarCopy* recyc = nullptr;
+};
+
+deviceMemory<dfloat> o_planarWork;
+RecyclingData rec1;
+RecyclingData rec2;
+
+#ifdef __okl__
+
+void udfDirichlet(bcData *bc)
+{
+  if (isField("fluid velocity")) {
+    if (bc->id==2) { // inner, zmin = inlet
+//      bc->uxFluid = 0.0;
+//      bc->uyFluid = 0.0;
+//      bc->uzFluid = p_u_inner;
+      bc->uxFluid = bc->usrwrk[bc->idxVol + 0 * bc->fieldOffset];
+      bc->uyFluid = bc->usrwrk[bc->idxVol + 1 * bc->fieldOffset];
+      bc->uzFluid = bc->usrwrk[bc->idxVol + 2 * bc->fieldOffset];
+    } else if (bc->id==5) { // outer, zmax = inlet
+//      bc->uxFluid = 0.0;
+//      bc->uyFluid = 0.0;
+//      bc->uzFluid = p_u_outer;
+      bc->uxFluid = bc->usrwrk[bc->idxVol + 0 * bc->fieldOffset];
+      bc->uyFluid = bc->usrwrk[bc->idxVol + 1 * bc->fieldOffset];
+      bc->uzFluid = bc->usrwrk[bc->idxVol + 2 * bc->fieldOffset];
+    }
+  } else if (isField("fluid pressure")) {
+    const dfloat iU0delta = 20.0;
+    const dfloat un = bc->uxFluid * bc->nx + bc->uyFluid * bc->ny + bc->uzFluid * bc->nz;
+    const dfloat s0 = 0.5 * (1.0 - tanh(un * iU0delta));
+    bc->pFluid = -0.5 * (bc->uxFluid * bc->uxFluid + bc->uyFluid * bc->uyFluid + bc->uzFluid * bc->uzFluid) * s0;
+  } else if (isField("scalar temperature")) {
+    if (bc->id==2) { // inner, zmin = inlet
+      bc->sScalar = p_t_inner;
+    } else if (bc->id==5) { // outer, zmax = inlet
+      bc->sScalar = p_t_outer;
+    }
+  }
+}
+
+@kernel void axpbySurface(const dlong Nelements, // This only works when no corners
+                          const dlong bcid,
+                          const int nFields,
+                          const dlong offset,
+                          @ restrict const dlong *vmapM,
+                          @ restrict const int *EToB,
+                          const dfloat alpha,
+                          @ restrict const dfloat *x,
+                          const dfloat beta,
+                          @ restrict dfloat *y)
+{ 
+  for (dlong e = 0; e < Nelements; e++; @outer(0))
+    for (int f = 0; f < p_Nfaces; f++) {
+      @barrier();
+      for (int m = 0; m < p_Nfp; ++m; @inner(0)) {
+        const int n = m + f * p_Nfp;
+        const int idM = vmapM[e * p_Nfp * p_Nfaces + n];
+        const int id = EToB[f + p_Nfaces * e];
+        if (id == bcid) {
+          for(int i = 0; i < nFields; i++) {
+            y[idM + i * offset] = alpha * x[idM + i * offset] + beta * y[idM + i * offset];
+          }
+        }
+      }
+    }
+}
+
+#endif
+
+void setup_eTag()
+{
+  auto meshV = nrs->fluid->mesh;
+  auto meshT = nrs->meshT;
+  eTag.resize(meshT->Nelements);
+
+  const dfloat rmid = 1.1; // 0, hot water, 1.0, copper, 1.2, cold water, 2.0, un-scaled re2
+
+  const int mx = meshV->Nq/2; // get an interior point
+  const int my = meshV->Nq/2;
+  const int mz = meshV->Nq/2;
+  const int im = mz * meshV->Nq*meshV->Nq + my * meshV->Nq + mx;
+
+  std::vector<int> nelm(5, 0);
+
+  auto [x, y, z] = meshT->xyzHost();
+  for (int e=0; e<meshV->Nelements; e++) {
+    const dfloat xm = x[e*meshT->Np + im];
+    const dfloat ym = y[e*meshT->Np + im];
+    const dfloat rm = std::sqrt(xm*xm + ym*ym);
+    if (rm < rmid) {
+      eTag[e] = 1;
+      nelm[0]++;
+    } else {
+      eTag[e] = 2;
+      nelm[1]++;
+    }
+  }
+  for (int e=meshV->Nelements; e<meshT->Nelements; e++) {
+    eTag[e] = 3;
+    nelm[2]++;
+  }
+  nelm[3] = meshV->Nelements;
+  nelm[4] = meshT->Nelements;
+
+  MPI_Allreduce(MPI_IN_PLACE, nelm.data(), nelm.size(), MPI_INT, MPI_SUM, platform->comm.mpiComm());
+
+  if (platform->comm.mpiRank() == 0) {
+    printf("chk-eTag %d %d %d / %d %d \n", nelm[0], nelm[1], nelm[2], nelm[3], nelm[4]);
+  }
+}
+
+void setup_recycling()
+{
+  // main BC usrwrk
+  platform->app->bc->o_usrwrk.resize(3 * nrs->fluid->fieldOffset);
+  
+  // internal work for planarCopy
+  o_planarWork.resize(3 * nrs->fluid->fieldOffset);
+    
+  deviceMemory<dfloat> o_one(nrs->meshT->Nlocal);
+  platform->linAlg->fill(o_one.size(), 1.0, o_one);
+  
+  auto set_recycling = [&](RecyclingData &rec, 
+                           int bid,
+                           dfloat length)
+  {
+    auto& fluid = nrs->fluid;
+    auto mesh = fluid->mesh;
+    auto o_one1 = o_one.slice(0, mesh->Nlocal); 
+
+    rec.bID = bid;
+
+    const int h_bID[1] = {bid};
+    rec.o_bID.resize(1);
+    rec.o_bID.copyFrom(h_bID, 1);
+
+    // get inlet area and outward normal
+    rec.area = mesh->surfaceAreaMultiplyIntegrate(rec.o_bID, o_one1);
+    rec.normal = mesh->surfaceAreaNormalMultiplyIntegrate(rec.o_bID, o_one1);
+    for (auto &v : rec.normal) {
+      v /= rec.area;
+    }
+    dfloat norm2 = 0.0;
+    for (auto &v : rec.normal) {
+      norm2 += v * v;
+    }
+    const dfloat scale = 1.0 / std::sqrt(norm2);
+    for (auto &v : rec.normal) {
+      v *= scale;
+    }
+
+    // offset to recycle
+    const dfloat dx = -rec.normal[0] * length;
+    const dfloat dy = -rec.normal[1] * length;
+    const dfloat dz = -rec.normal[2] * length;
+
+    rec.recyc = new planarCopy(mesh,
+                          fluid->o_solution(),
+                          mesh->dim,
+                          fluid->fieldOffset,
+                          dx, dy, dz,
+                          bid,
+                          o_planarWork);
+
+    if (platform->comm.mpiRank() == 0) {
+      printf("chk-rec0  bid= %d  area= %.4e  dxyz= %.4e %.4e %.4e\n",
+             bid, rec.area, dx, dy, dz);
+    }
+  };
+
+  set_recycling(rec1, 2, 2.0);
+  set_recycling(rec2, 5, 2.0);
+}
+
+void apply_recycling(double time, int tstep, bool verbose)
+{
+  auto& fluid = nrs->fluid;
+
+  platform->linAlg->fill(fluid->fieldOffsetSum, 0.0, platform->app->bc->o_usrwrk);
+
+  auto upd_recycling = [&](RecyclingData &rec, dfloat uBulk)
+  {
+    auto mesh = fluid->mesh;
+    rec.recyc->execute(); // reset o_planarWork
+
+    const auto flux =
+      mesh->surfaceAreaNormalMultiplyVectorIntegrate(fluid->fieldOffset,
+                                                     rec.o_bID,
+                                                     o_planarWork);
+    uBulk = std::abs(uBulk);
+    const auto scale = -uBulk * rec.area / flux;
+    axpbySurface(mesh->Nelements,
+                 rec.bID,
+                 mesh->dim,
+                 fluid->fieldOffset,
+                 mesh->o_vmapM, mesh->o_EToB,
+                 scale, o_planarWork, 1.0, platform->app->bc->o_usrwrk);
+
+    if (verbose && platform->comm.mpiRank() == 0) {
+      printf("chk-rec %d %g bid= %d  flux= %.4e  uBulk= %.4e  scale= %.4e\n",
+             tstep, time, rec.bID, flux, uBulk, scale);
+    }
+  };
+
+  upd_recycling(rec1, u_inner);
+  upd_recycling(rec2, u_outer);
+}
+
+void uservp(double time)
+{
+  auto& fluid = nrs->fluid;
+  auto& scalar = nrs->scalar;
+
+  if (updateProperties) {
+    if (platform->comm.mpiRank() == 0) {
+      std::cout << "updating properties"
+                << "\n";
+    }
+    const std::vector<dfloat> rad = {1.0*r_scale, 1.2*r_scale, 2.0*r_scale};
+    const std::vector<dfloat> rho = {988.0, 988.0}; // [kg/m^3]
+    const std::vector<dfloat> mue = {5.47e-4, 5.47e-4};
+
+    const std::vector<dfloat> rhoCp = {4.12984e6, 4.12984e6, 3.44960e6};
+    const std::vector<dfloat> con = {0.643, 0.643, 385};
+
+    {
+      const auto D1 = 2 * rad[0];
+      const auto U1 = std::abs(u_inner);
+      const auto Re1 = rho[0] * U1 * D1 / mue[0];
+      const auto Pe1 = rhoCp[0] * U1 * D1 / con[0];
+      const auto Pr1 = Pe1 / Re1;
+
+      const auto D2 = 2 * (rad[2] - rad[1]); // hydro diameter of annulus
+      const auto U2 = std::abs(u_outer);
+      const auto Re2 = rho[1] * U2 * D2 / mue[1];
+      const auto Pe2 = rhoCp[1] * U2 * D2 / con[1];
+      const auto Pr2 = Pe2 / Re2;
+
+      if (platform->comm.mpiRank() == 0) {
+        printf("chk-scale Re(in)= %.4e  Re(out)= %.4e\n", Re1, Re2);
+        printf("chk-scale Pe(in)= %.4e  Pe(out)= %.4e\n", Pe1, Pe2);
+        printf("chk-scale Pr(in)= %.4e  Pr(out)= %.4e\n", Pr1, Pr2);
+      }
+    }
+
+    auto set_prop = [&](mesh_t *mesh,
+                        occa::memory &o_prop,
+                        const std::vector<dfloat> &data)
+    {
+      std::vector<dfloat> tmp(mesh->Nlocal, 0);
+
+      for (dlong e = 0; e < mesh->Nelements; ++e) {
+        const auto tag = eTag[e] - 1;
+        const auto val = data[tag];
+        for (int i=0; i<mesh->Np; ++i) {
+          tmp[e * mesh->Np + i] = val;
+        }
+      }
+      o_prop.copyFrom(tmp.data(), mesh->Nlocal);
+    };
+
+    // velocity
+    {
+      auto mesh = fluid->mesh;
+      auto o_mue = fluid->o_prop.slice(0 * fluid->fieldOffset);
+      auto o_rho = fluid->o_prop.slice(1 * fluid->fieldOffset);
+      set_prop(mesh, o_rho, rho);
+      set_prop(mesh, o_mue, mue);
+    }
+    // temperature
+    {
+      auto mesh = scalar->mesh("temperature");
+      auto o_con = scalar->o_diffusionCoeff("temperature");
+      auto o_rhoCp = scalar->o_transportCoeff("temperature");
+      set_prop(mesh, o_rhoCp, rhoCp);
+      set_prop(mesh, o_con, con);
+    }
+    updateProperties = 0;
+  }
+}
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  platform->par->extract("casedata", "u_inner", u_inner);
+  platform->par->extract("casedata", "u_outer", u_outer);
+  platform->par->extract("casedata", "t_inner", t_inner);
+  platform->par->extract("casedata", "t_outer", t_outer);
+  platform->par->extract("casedata", "r_max", r_max);
+  r_scale = r_max / 2.0; // mesh [0, 2.0]
+  u_inner = std::abs(u_inner);
+  u_outer = -std::abs(u_outer);
+}
+
+void UDF_LoadKernels(deviceKernelProperties& kernelInfo)
+{
+  kernelInfo.define("p_u_inner") = u_inner;
+  kernelInfo.define("p_u_outer") = u_outer;
+  kernelInfo.define("p_t_inner") = t_inner;
+  kernelInfo.define("p_t_outer") = t_outer;
+}
+
+void UDF_Setup()
+{
+  setup_eTag(); // must tag elem before mesh rescaling
+  nrs->userProperties = &uservp;
+
+  {
+    auto mesh = nrs->meshT;
+    platform->linAlg->rescale(-r_max, r_max, mesh->o_x, platform->comm.mpiComm());
+    platform->linAlg->rescale(-r_max, r_max, mesh->o_y, platform->comm.mpiComm());
+    mesh->update(); // need this to update surface jacobian for recycling
+  }
+
+  setup_recycling(); // must after mesh rescaling 
+
+  if (platform->options.getArgs("RESTART FILE NAME").empty()) {
+    {
+      auto& fluid = nrs->fluid;
+      auto mesh = fluid->mesh;
+      auto [x, y, z] = mesh->xyzHost();
+      std::vector<dfloat> U(mesh->dim * fluid->fieldOffset, 0.0);
+
+      for(int e = 0; e < mesh->Nelements; e++) {
+        for(int n = 0; n < mesh->Np; n++) {
+          if (eTag[e] == 1) { // inner
+            U[n + e*mesh->Np + 2 * fluid->fieldOffset] = u_inner;
+          } else if (eTag[e] == 2) { // outer
+            U[n + e*mesh->Np + 2 * fluid->fieldOffset] = u_outer;
+          }
+        }
+      }
+      fluid->o_U.copyFrom(U.data(), U.size());
+    }
+
+    {
+      auto& scalar = nrs->scalar;
+      auto mesh = scalar->mesh("temperature");
+      std::vector<dfloat> T(mesh->Nlocal);
+
+      for(int e = 0; e < mesh->Nelements; e++) {
+        for(int n = 0; n < mesh->Np; n++) {
+          if (eTag[e] == 1) { // inner
+            T[n + e*mesh->Np] = t_inner;
+          } else if (eTag[e] == 2) { // outer
+            T[n + e*mesh->Np] = t_outer;
+          } else if (eTag[e] == 3) { // middle
+            T[n + e*mesh->Np] = t_outer;
+          }
+        }
+      }
+      scalar->o_solution("temperature").copyFrom(T.data(), T.size());
+    }
+  }
+
+  // chk steady
+  o_solutionPrev = platform->device.malloc<dfloat>(2 * nrs->fluid->fieldOffset);
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  auto &fluid = nrs->fluid;
+  auto& scalar = nrs->scalar;
+
+  int iostep = 0;
+  platform->options.getArgs("RUNTIME STATISTICS FREQUENCY", iostep);
+
+  const bool verbose =
+    (platform->verbose()) ||
+    (iostep > 0 && tstep % iostep == 0);
+    
+  apply_recycling(time, tstep, verbose);
+
+  if (tstep==0) {
+    nrs->writeCheckpoint(time);
+  }
+
+  if (!nrs->timeStepConverged) {
+    return;                
+  }
+
+  auto ifpost = [](int tstep) {
+    int ioChk = 100; // freq for postprocessing
+    platform->par->extract("casedata", "iochk", ioChk);
+    return (ioChk>0 && tstep>0 && (tstep % ioChk == 0)) ? true : false;
+  };
+  auto compute_dUdt = [&](dlong N, dfloat dt, occa::memory& o_fld, occa::memory& o_wrk)
+  {
+    platform->linAlg->axpby(N, -1.0, o_fld, 1.0, o_wrk);
+    return platform->linAlg->amax(N, o_wrk, platform->comm.mpiComm()) / dt;
+  };
+
+  { // chk steady
+    auto o_UzPrev = o_solutionPrev.slice(0, fluid->fieldOffset);
+    auto o_TPrev = o_solutionPrev.slice(fluid->fieldOffset, fluid->fieldOffset);
+    auto o_Uz = fluid->o_U + 2 * fluid->fieldOffset;
+    auto o_T = scalar->o_solution("temperature");
+
+    if (ifpost(tstep)) {
+      double dUzdt = compute_dUdt(fluid->mesh->Nlocal, fluid->dt[0], o_Uz, o_UzPrev);
+      double dTdt = compute_dUdt(fluid->mesh->Nlocal, fluid->dt[0], o_T, o_TPrev);
+      if (platform->comm.mpiRank() == 0) {
+        printf("chk-stdy %d %.4e  dUz/dt= %.8e  dT/dt= %.8e\n", tstep, time, dUzdt, dTdt);
+      }
+    }
+    if (ifpost(tstep+1)) {
+      o_UzPrev.copyFrom(o_Uz, fluid->mesh->Nlocal);
+      o_TPrev.copyFrom(o_T, scalar->mesh("temperature")->Nlocal);
+    }
+  }
+}

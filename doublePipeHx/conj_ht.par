@@ -1,0 +1,40 @@
+userSections = CASEDATA
+
+[GENERAL] 
+#startFrom = "restart.fld"
+polynomialOrder = 7
+numSteps = 50000
+dt = 1e-2 #2e-02
+timeStepper = tombo2
+advectionSubCyclingSteps = 1
+checkpointInterval = 5000
+
+regularization = hpfrt + nModes=1 + scalingCoeff=10
+
+scalars = temperature
+
+[MESH]
+file = "m1z10.re2" # 10 layers in z
+
+[FLUID PRESSURE]
+residualTol = 1e-06
+initialGuess = projectionAconj+nVector=20
+
+[FLUID VELOCITY]
+boundaryTypeMap = wall,v,O,O,v
+residualTol = 1e-08
+initialGuess = projectionAconj+nVector=20
+
+[SCALAR TEMPERATURE]
+mesh = fluid + solid
+boundaryTypeMap = I,t,I,I,t,I
+residualTol = 1e-08
+initialGuess = projectionAconj+nVector=20
+
+[CASEDATA]
+u_inner = 1.29e-1 # m/s
+u_outer = 5.03e-2
+t_inner = 90 # deg c
+t_outer = 20
+
+r_max = 0.1 # re2 has 2.0
