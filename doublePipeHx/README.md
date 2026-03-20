@@ -2,6 +2,11 @@
 
 Version: NekRS v26
 
+This example features
+- Running NekRS case in dimensional units
+- Two fluid systems separated by solid domain
+- Dual recycling inlet
+
 | Domain | Material | T (inlet) | U (vz, inlet) | hydro diameter | Re_D | Pe_D |
 |:---|:---|:---|:---|:---|:---|:---|
 | $0 < r < r_1$   | hot water  | $90^\circ C$ |  1.29e-1 [m/s] | $2 r_1$      | 2.3300e+04 | 8.2854e+04 |
@@ -48,7 +53,9 @@ In `usrdat2`, we use `zmid=5.0` and `rmid=1.1` (can be obtained by any interior 
 
 ## Early Results
 
-At time = 50, velocity seems to reach steady state while temperature hasn't.
+- Steady state check  
+  At time = 2000, both velocity and temperature settle to (near) steady state.  
+  <img src="figs/chk_stdy.png" height="400">
 
 - vz slices at z=5 (left) and at y=0 (right)    
   <img src="figs/vz_slices.png" height="400">
@@ -56,21 +63,37 @@ At time = 50, velocity seems to reach steady state while temperature hasn't.
 - vz (left) and T (right) wrap in z direction at z=5.   
   <img src="figs/vz_t_wrap.png" height="400">
 
-- T at several x lines (z=0, 5, 10)    
-  <img src="figs/t_xlines.png" height="400">
-
 - vz at several x lines (z=0, 5, 10)      
   <img src="figs/vz_xlines.png" height="400">
 
+- T at several x lines (z=0, 5, 10)    
+  <img src="figs/t_xlines.png" height="400">
+
+- T outlet
+  T outlet is the surface integral average of the temperature at outlet.
+
+  $$T_{bar} = \int_A T dA / \left(\int_A dA\right) = \int_A T dA / A$$
+  $$T_{bulk} = \int_A uT dA / \left(\int_A u dA\right) = \int_A uT dA / (A * U)$$
+
+
+  T_bulk
+
+  ```
+  T_bulk  inlet       outlet
+  hot     90          87.1376458
+  cold    20          22.8850030
+
+  T_bar
+  hot     90          79.1581461
+  cold    20          25.4244381
+  ```
 
 ## Validation
 
-We deploy recyclined inlet to maintain prescribed mean flow, turbulent outlet for stability, and walls for the rest.
-For the temperature, only inlet temperature is set and the rest are all insulated wall.
+We deploy recycled inlet to maintain prescribed mean flow, turbulent outlet for stability (if backflow presents), and walls for the rest.
+For the temperature BCs, only inlet temperature is set and the rest are all insulated wall.
 
-While keeping the mass flow rate for both fluid systems, according to ChatGPT, temperature at the outlet should eventually become
-
-Table from ChatGPT, need double-check
+Table from ChatGPT (using 1D estimation)
 
 ```
 m_dot   U1        U2        Re1      Re2      Pe1      Pe2      T_final         Th,out   Tc,out
@@ -89,6 +112,7 @@ kg/s    m/s       m/s
 
 
 TODO
-- check steady state (dU/dt, dT/dt)
 - fix parameters, nondimensionalize
 - add nusselt number
+- planar avg
+- recycling temperature to achieve target Tbulk at inlets

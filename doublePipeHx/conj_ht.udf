@@ -21,22 +21,19 @@ deviceMemory<dfloat> o_planarWork;
 RecyclingData rec1;
 RecyclingData rec2;
 
+RecyclingData out1; // use this struct to store area for Toutlet
+RecyclingData out2;
+
 #ifdef __okl__
 
 void udfDirichlet(bcData *bc)
 {
   if (isField("fluid velocity")) {
     if (bc->id==2) { // inner, zmin = inlet
-//      bc->uxFluid = 0.0;
-//      bc->uyFluid = 0.0;
-//      bc->uzFluid = p_u_inner;
       bc->uxFluid = bc->usrwrk[bc->idxVol + 0 * bc->fieldOffset];
       bc->uyFluid = bc->usrwrk[bc->idxVol + 1 * bc->fieldOffset];
       bc->uzFluid = bc->usrwrk[bc->idxVol + 2 * bc->fieldOffset];
     } else if (bc->id==5) { // outer, zmax = inlet
-//      bc->uxFluid = 0.0;
-//      bc->uyFluid = 0.0;
-//      bc->uzFluid = p_u_outer;
       bc->uxFluid = bc->usrwrk[bc->idxVol + 0 * bc->fieldOffset];
       bc->uyFluid = bc->usrwrk[bc->idxVol + 1 * bc->fieldOffset];
       bc->uzFluid = bc->usrwrk[bc->idxVol + 2 * bc->fieldOffset];
@@ -65,7 +62,7 @@ void udfDirichlet(bcData *bc)
                           @ restrict const dfloat *x,
                           const dfloat beta,
                           @ restrict dfloat *y)
-{ 
+{
   for (dlong e = 0; e < Nelements; e++; @outer(0))
     for (int f = 0; f < p_Nfaces; f++) {
       @barrier();
@@ -130,20 +127,20 @@ void setup_recycling()
 {
   // main BC usrwrk
   platform->app->bc->o_usrwrk.resize(3 * nrs->fluid->fieldOffset);
-  
+
   // internal work for planarCopy
   o_planarWork.resize(3 * nrs->fluid->fieldOffset);
-    
+
   deviceMemory<dfloat> o_one(nrs->meshT->Nlocal);
   platform->linAlg->fill(o_one.size(), 1.0, o_one);
-  
-  auto set_recycling = [&](RecyclingData &rec, 
+
+  auto set_recycling = [&](RecyclingData &rec,
                            int bid,
                            dfloat length)
   {
     auto& fluid = nrs->fluid;
     auto mesh = fluid->mesh;
-    auto o_one1 = o_one.slice(0, mesh->Nlocal); 
+    auto o_one1 = o_one.slice(0, mesh->Nlocal);
 
     rec.bID = bid;
 
@@ -187,6 +184,31 @@ void setup_recycling()
 
   set_recycling(rec1, 2, 2.0);
   set_recycling(rec2, 5, 2.0);
+}
+
+void setup_outlet_bar()
+{
+  deviceMemory<dfloat> o_one(nrs->meshT->Nlocal);
+  platform->linAlg->fill(o_one.size(), 1.0, o_one);
+
+  auto set_recycling = [&](RecyclingData &rec,
+                           int bid)
+  {
+    auto& fluid = nrs->fluid;
+    auto mesh = fluid->mesh;
+    auto o_one1 = o_one.slice(0, mesh->Nlocal);
+
+    rec.bID = bid;
+
+    const int h_bID[1] = {bid};
+    rec.o_bID.resize(1);
+    rec.o_bID.copyFrom(h_bID, 1);
+
+    rec.area = mesh->surfaceAreaMultiplyIntegrate(rec.o_bID, o_one1);
+  };
+
+  set_recycling(out1, 3);
+  set_recycling(out2, 4);
 }
 
 void apply_recycling(double time, int tstep, bool verbose)
@@ -328,7 +350,8 @@ void UDF_Setup()
     mesh->update(); // need this to update surface jacobian for recycling
   }
 
-  setup_recycling(); // must after mesh rescaling 
+  setup_recycling(); // must after mesh rescaling
+  setup_outlet_bar();
 
   if (platform->options.getArgs("RESTART FILE NAME").empty()) {
     {
@@ -378,28 +401,27 @@ void UDF_ExecuteStep(double time, int tstep)
   auto &fluid = nrs->fluid;
   auto& scalar = nrs->scalar;
 
-  int iostep = 0;
-  platform->options.getArgs("RUNTIME STATISTICS FREQUENCY", iostep);
+  auto ifpost = [](int tstep)
+  {
+    bool retVal = false;
+    retVal |= nrs->lastStep;
 
-  const bool verbose =
-    (platform->verbose()) ||
-    (iostep > 0 && tstep % iostep == 0);
-    
-  apply_recycling(time, tstep, verbose);
+    int ioChk = 100; // freq for postprocessing
+    platform->par->extract("casedata", "iochk", ioChk);
+    retVal |= (ioChk>0 && tstep>0 && (tstep % ioChk == 0));
+    return retVal;
+  };
+
+  apply_recycling(time, tstep, tstep==0 || ifpost(tstep));
 
   if (tstep==0) {
     nrs->writeCheckpoint(time);
   }
 
   if (!nrs->timeStepConverged) {
-    return;                
+    return;
   }
 
-  auto ifpost = [](int tstep) {
-    int ioChk = 100; // freq for postprocessing
-    platform->par->extract("casedata", "iochk", ioChk);
-    return (ioChk>0 && tstep>0 && (tstep % ioChk == 0)) ? true : false;
-  };
   auto compute_dUdt = [&](dlong N, dfloat dt, occa::memory& o_fld, occa::memory& o_wrk)
   {
     platform->linAlg->axpby(N, -1.0, o_fld, 1.0, o_wrk);
@@ -422,6 +444,42 @@ void UDF_ExecuteStep(double time, int tstep)
     if (ifpost(tstep+1)) {
       o_UzPrev.copyFrom(o_Uz, fluid->mesh->Nlocal);
       o_TPrev.copyFrom(o_T, scalar->mesh("temperature")->Nlocal);
+    }
+  }
+
+  if (tstep==0 || ifpost(tstep)) { // chk T outlet
+    auto mesh = fluid->mesh;
+    auto o_Uz = fluid->o_U + 2 * fluid->fieldOffset;
+    auto o_T = scalar->o_solution("temperature");
+
+    poolDeviceMemory<dfloat> o_uT(mesh->Nlocal);
+    platform->linAlg->axmyz(mesh->Nlocal, 1.0, o_Uz, o_T, o_uT); // X = aXY
+
+    auto compute_Tbar = [&](RecyclingData &rec)
+    {
+      auto Tint = mesh->surfaceAreaMultiplyIntegrate(rec.o_bID, o_T.slice(0, mesh->Nlocal));
+      return Tint / rec.area;
+    };
+    auto compute_Tblk = [&](RecyclingData &rec, dfloat umean)
+    {
+      auto uTint = mesh->surfaceAreaMultiplyIntegrate(rec.o_bID, o_uT);
+      return std::abs(uTint / (rec.area * umean));
+    };
+
+    const auto Tbar1 = compute_Tbar(rec1); // hot inlet
+    const auto Tbar2 = compute_Tbar(out1); // hot outlet
+    const auto Tbar3 = compute_Tbar(rec2);
+    const auto Tbar4 = compute_Tbar(out2);
+
+    const auto Tblk1 = compute_Tblk(rec1, u_inner);
+    const auto Tblk2 = compute_Tblk(out1, u_inner);
+    const auto Tblk3 = compute_Tblk(rec2, u_outer);
+    const auto Tblk4 = compute_Tblk(out2, u_outer);
+    if (platform->comm.mpiRank() == 0) {
+      printf("chk-Tbar %4s %d %.4e  (bar/bulk) inlet %.8e  %.8e   outlet  %.8e  %.8e\n",
+             "hot", tstep, time, Tbar1, Tbar2, Tblk1, Tblk2);
+      printf("chk-Tbar %4s %d %.4e  (bar/bulk) inlet %.8e  %.8e   outlet  %.8e  %.8e\n",
+             "cold", tstep, time, Tbar3, Tbar4, Tblk3, Tblk4);
     }
   }
 }

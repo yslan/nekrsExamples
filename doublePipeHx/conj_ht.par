@@ -1,13 +1,13 @@
 userSections = CASEDATA
 
 [GENERAL] 
-#startFrom = "restart.fld"
+#startFrom = "r1.fld+U+T"
 polynomialOrder = 7
-numSteps = 50000
-dt = 1e-2 #2e-02
+numSteps = 20000
+dt = 0.1
 timeStepper = tombo2
 advectionSubCyclingSteps = 1
-checkpointInterval = 5000
+checkpointInterval = 2000
 
 regularization = hpfrt + nModes=1 + scalingCoeff=10
 
@@ -29,6 +29,8 @@ initialGuess = projectionAconj+nVector=20
 mesh = fluid + solid
 boundaryTypeMap = I,t,I,I,t,I
 residualTol = 1e-08
+#preconditioner = multigrid
+#smootherType = jacobi+fourthOptCheby
 initialGuess = projectionAconj+nVector=20
 
 [CASEDATA]
