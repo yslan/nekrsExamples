@@ -1,0 +1,85 @@
+// --- fieldExtract: copy the marked blocks into your own .udf --------------- //
+#include "fieldExtract.hpp"            // [fieldExtract] copy the header next to your case
+std::unique_ptr<fieldExtract> sampler; // [fieldExtract] one sampler per box
+
+static dfloat zLength;
+
+#ifdef __okl__
+
+void udfDirichlet(bcData *bc) // dummy BC
+{
+}
+
+#endif
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  platform->par->extract("casedata", "zlength", zLength);
+}
+
+void UDF_Setup()
+{
+  // rescale mesh
+  {
+    auto mesh = nrs->meshT;
+    platform->linAlg->rescale(0.0, zLength, mesh->o_z, platform->comm.mpiComm());
+  }
+
+  // [fieldExtract] set up the sampler ---------------------------------------- //
+  {
+    auto mesh = nrs->meshT;
+    std::vector<int> boxDims = {11, 1, 201}; // npts in X, Y, Z (endpoints included)
+
+    // list of fields: {name, {device memory per component}}
+    std::vector<fieldExtract::field> fldList;
+    deviceMemory<dfloat> o_w(nrs->fluid->o_U.slice(2 * nrs->fieldOffset, nrs->fieldOffset));
+    deviceMemory<dfloat> o_T(nrs->scalar->o_solution("temperature"));
+    fldList.push_back({"vz", std::vector{o_w}});
+    fldList.push_back({"temp", std::vector{o_T}});
+
+    std::string fname = "ttt"; // output prefix -> tttBoxNNNNN.vts
+
+    std::array<dfloat, 3> x0 = {0.0, 0.0, 2.0}; // box start pt
+    std::array<dfloat, 3> x1 = {1.0, 0.0, 5.5}; // box end pt
+
+    sampler = std::make_unique<fieldExtract>(mesh, boxDims, fldList, fname, x0, x1);
+  }
+}
+
+void test_sol(double time, int tstep)
+{
+
+  auto &fluid = nrs->fluid;
+  auto mesh = fluid->mesh;
+  auto [x, y, z] = mesh->xyzHost();
+  std::vector<dfloat> U(mesh->dim * nrs->fluid->fieldOffset, 0.0);
+  std::vector<dfloat> T(nrs->fluid->fieldOffset, 0.0);
+  for (int n = 0; n < mesh->Nlocal; n++) {
+    const auto R = 0.5;
+    const auto xr = x[n] / R;
+    const auto yr = y[n] / R;
+
+    auto rr = xr * xr + yr * yr;
+    rr = (rr > 0) ? sqrt(rr) : 0.0;
+
+    auto uz = 6 / 5. * (1 - pow(rr, 6));
+
+    U[n + 0 * nrs->fluid->fieldOffset] = 0.0;
+    U[n + 1 * nrs->fluid->fieldOffset] = 0.1;
+    U[n + 2 * nrs->fluid->fieldOffset] = uz * cos(time);
+
+    T[n] = sin(M_PI * x[n]) * cos(2.7 * M_PI * z[n] + 0.2);
+  }
+
+  nrs->fluid->o_U.copyFrom(U.data(), U.size());
+  nrs->scalar->o_solution("temperature").copyFrom(T.data(), mesh->Nlocal);
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  test_sol(time, tstep);
+  // [fieldExtract] interpolate + write .vts on your chosen cadence
+  if (tstep % 2 == 0) {
+    sampler->process(time, tstep);
+  }
+}
