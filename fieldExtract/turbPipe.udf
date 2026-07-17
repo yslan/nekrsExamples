@@ -155,6 +155,13 @@ void UDF_ExecuteStep(double time, int tstep)
     feLine->process(time, tstep);
     fePlane->process(time, tstep);
     feCyl->process(time, tstep);
+
+    // [fieldExtract] spatial averages (box mode only): "gather" collapses the
+    // averaged axes; "gather-scatter" broadcasts the average back onto the box
+    feBox3d->doAvg(time, tstep, "xy");                  // -> box3d_avgxyLine*.vts
+    feBox3d->doAvg(time, tstep, "z", "gather-scatter"); // -> box3d_avgzBox*.vts
+    feBox3d->doAvg(time, tstep, "xyz");                 // -> box3d_avgxyzPoint*.vts
+    fePlane->doAvg(time, tstep, "y");                   // -> plane_avgyLine*.vts
   }
 
   // [fieldExtract] release before MPI_Finalize (frees the findpts MPI comm);

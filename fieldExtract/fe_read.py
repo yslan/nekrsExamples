@@ -69,3 +69,50 @@ def check(fname, tol=1e-2):
         f"relerr(vz)={ev:.2e} relerr(temp)={eT:.2e} -> {'PASS' if ok else 'FAIL'}"
     )
     return ok
+
+
+def trap_avg(F, dims, axes):
+    """Trapezoidal average of flat field F (dims=(nx,ny,nz)) over axes in 'xyz'.
+
+    Mirrors fieldExtract::doAvg: endpoints half weight, normalized by (n-1) per
+    averaged axis. Returns shape (nz', ny', nx') with averaged axes kept as 1.
+    """
+    nx, ny, nz = dims
+    A = np.asarray(F, dtype=np.float64).reshape((nz, ny, nx))
+    for ax in axes.lower():
+        axis = {"x": 2, "y": 1, "z": 0}[ax]
+        n = A.shape[axis]
+        w = np.ones(n)
+        w[0] = w[-1] = 0.5
+        shape = [1, 1, 1]
+        shape[axis] = n
+        A = (A * w.reshape(shape)).sum(axis=axis, keepdims=True) / (n - 1)
+    return A
+
+
+def check_avg(avg_fname, src_fname, axes, mode, tol=1e-5):
+    """Compare an _avg .vts against the numpy trapezoid-average of its source box .vts.
+
+    Exercises the exact contract of fieldExtract::doAvg (same grid, same weights),
+    so tol is tight -- limited only by float32 storage / summation order.
+    """
+    da = load(avg_fname)
+    ds = load(src_fname)
+    nx, ny, nz = ds["dims"]
+    ok = True
+    errs = []
+    for key in ("vz", "temp"):
+        ref = trap_avg(ds[key], ds["dims"], axes)
+        if mode == "gather-scatter":
+            ref = np.broadcast_to(ref, (nz, ny, nx))
+        got = np.asarray(da[key], dtype=np.float64).reshape(ref.shape)
+        # normalize by the UNaveraged source-field scale: averages can be ~0
+        # (odd symmetry), while the float32 storage noise is absolute
+        e = np.abs(got - ref).max() / np.abs(ds[key]).max()
+        errs.append(e)
+        ok = ok and (e < tol)
+    print(
+        f"{avg_fname}: dims={da['dims']} avg={axes} mode={mode} "
+        f"relerr(vz)={errs[0]:.2e} relerr(temp)={errs[1]:.2e} -> {'PASS' if ok else 'FAIL'}"
+    )
+    return ok
