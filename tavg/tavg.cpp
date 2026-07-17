@@ -95,10 +95,15 @@ void tavg::buildKernel(occa::properties kernelInfo)
   E4Kernel = buildKernel("E4");
 }
 
-void tavg::reset()
+void tavg::reset(double atime_)
 {
-  counter = 0;
-  atime = 0;
+  if (atime_ > 0) {
+    atime = atime_;
+    counter = 1;
+  } else {
+    counter = 0;
+    atime = 0;
+  }
 }
 
 void tavg::run(double time)
