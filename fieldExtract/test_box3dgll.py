@@ -13,7 +13,7 @@ import fe_read
 X0 = (-0.3, -0.3, 2.0)  # must match turbPipe.udf::feBox3dGll
 X1 = (0.3, 0.3, 4.0)
 
-pattern = "box3dgllBox*.vts"
+pattern = "box3d_gll[0-9]*.vts"
 fname = sys.argv[1] if len(sys.argv) > 1 else sorted(glob.glob(pattern))[-1]
 
 d = fe_read.load(fname)

@@ -18,23 +18,20 @@
 //
 //   boxDims   : point counts {nx, ny, nz}, endpoints included (1D/2D via ny/nz=1)
 //   fldList   : vector of {name, {deviceMemory<dfloat> per component}}
-//   fname     : output prefix -> <fname>{Line|Plane|Box}NNNNN.vts
+//   fname     : output prefix -> <fname>[_gll]NNNNN.vts
 //   pointDist : optional per-axis distribution, "uniform" (default) | "gll"
 //               (Gauss-Lobatto-Legendre); 1 entry = all axes. Recorded in the
-//               .vts FieldData tag "pointDist" (0 uniform, 1 GLL) and doAvg uses
-//               the matching quadrature weights (trapezoid vs GLL).
+//               .vts FieldData tag "pointDist" (0 uniform, 1 GLL); doAvg uses the
+//               matching quadrature weights and "_gll" is appended to the name.
 //
 // Average mode (box only): reduce the current fields over one or more axes and
-// dump one .vts. Implemented as a custom integer-id gather-scatter (gslib/oogs,
-// same pattern as NekRS planarAvg): local points pre-reduce into one partial
-// sum per touched reduced cell, ogsAdd combines the cells across ranks (ids =
-// reduced-cell index), and the result scatters back. One handle is cached per
-// direction and freed in the destructor.
-//   sampler->doAvg(time, tstep, "xy");                  // gather: collapse x,y -> line
-//   sampler->doAvg(time, tstep, "z", "gather-scatter"); // broadcast z-avg onto the box
-//   -> <fname>_avg<dir>{Point|Line|Plane|Box}NNNNN.vts
-// It is an integral (trapezoidal) average over the uniform SAMPLING grid, not a
-// mass-matrix average over the SEM mesh.
+// dump one .vts. Custom integer-id gather-scatter (gslib/oogs, same pattern as
+// NekRS planarAvg); one handle cached per direction, freed in the destructor.
+//   sampler->doAvg(time, tstep, "xy");                  // gather: collapse x,y
+//   sampler->doAvg(time, tstep, "z", "gather-scatter"); // broadcast z-avg onto box
+//   -> <fname>[_gll]_avg<dir>_<g|gs>NNNNN.vts   (g=gather, gs=gather-scatter)
+// Integral (quadrature) average over the SAMPLING grid, not a mass-matrix
+// average over the SEM mesh.
 //
 // Grid points follow lexicographic (nz, ny, nx) ordering and are distributed
 // evenly across MPI ranks. The .vts layout is consumed by test.py / fe_read.py.
@@ -96,7 +93,7 @@ private:
   std::vector<field> userFieldList;
   int Nfields;
 
-  std::string fileName;
+  std::string fileName; // includes the "_gll" marker after setup
   int stepCounter;
 
   int boxDim = 0;
@@ -124,14 +121,15 @@ private:
   bool boxMode = false; // true: box ctor (x0/x1 grid); false: points ctor
   bool setupCalled = false;
   bool setPointsCalled = false;
+  bool avgAnnounced = false; // one-line notice on the first doAvg call
 
   std::map<std::string, int> avgCounter; // per-stream dump counter for doAvg
 
-  // Cached gather-scatter machinery for one doAvg configuration: local box
-  // points pre-reduce into per-cell "slot" partial sums (pointSlot maps each
-  // local point to its slot), the oogs exchange runs over the slots plus this
-  // rank's share of the reduced grid, and both modes read from the one result
-  // (gather-scatter: back through pointSlot; gather: the reduced-grid tail).
+  // Cached gather-scatter machinery for one doAvg configuration: local points
+  // pre-reduce into per-cell "slot" partial sums (pointSlot maps each local
+  // point to its slot), the oogs exchange runs over the slots plus this rank's
+  // share of the reduced grid; gather-scatter reads back through pointSlot,
+  // gather reads the reduced-grid tail.
   struct avgGs_t {
     oogs_t *gsh = nullptr;
     dlong nSlots = 0;             // locally-touched reduced cells
@@ -144,6 +142,9 @@ private:
   std::map<std::string, avgGs_t> avgGsh; // one entry per avg configuration
 
   void getIxyz(const dlong i, const int nx, const int nxy, int &ix, int &iy, int &iz);
+
+  // <stem>NNNNN.vts with a 5-digit zero-padded counter.
+  std::string outName(const std::string &stem, const int step) const;
 
   // Build (or fetch the cached) gslib/oogs machinery for one avg direction.
   avgGs_t &setupAvgGs(const std::array<bool, 3> &avg, const std::string &dirTag);
@@ -396,12 +397,25 @@ inline void fieldExtract::setupCommon(const std::vector<int> &boxDims_in,
   stepCounter = 0;
 }
 
+inline std::string fieldExtract::outName(const std::string &stem, const int step) const
+{
+  std::ostringstream s;
+  s << stem << std::setw(5) << std::setfill('0') << step << ".vts";
+  return s.str();
+}
+
 inline void fieldExtract::finishSetup(mesh_t *mesh)
 {
   nekrsCheck(!setPointsCalled, MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "points are not setup properly!");
 
-  // Layout of interpolated data in fldData: one contiguous block per field,
-  // each block laid out component-major (d) then point (i).
+  const double tStart = MPI_Wtime();
+
+  // mark GLL outputs in every filename derived from fileName
+  if (distCode[0] || distCode[1] || distCode[2]) {
+    fileName += "_gll";
+  }
+
+  // fldData layout: one contiguous block per field, component-major (d) then point (i).
   fldDataOffsetScan.resize(Nfields + 1);
   fldDataOffsetScan[0] = 0;
   int ifld = 1;
@@ -410,7 +424,6 @@ inline void fieldExtract::finishSetup(mesh_t *mesh)
     fldDataOffsetScan[ifld] = fldDataOffsetScan[ifld - 1] + numPointsLocal * dim_fld;
     ifld++;
   }
-
   fldData.resize(fldDataOffsetScan[Nfields]);
 
   interpolator = std::make_unique<pointInterpolation_t>(mesh, platform->comm.mpiComm());
@@ -418,6 +431,23 @@ inline void fieldExtract::finishSetup(mesh_t *mesh)
   interpolator->find();
 
   setupCalled = true;
+
+  platform->timer.set("fieldExtract::setup", MPI_Wtime() - tStart);
+
+  // one-line summary: global count + how evenly points split across ranks
+  dlong lmin = numPointsLocal, lmax = numPointsLocal, lsum = numPointsLocal;
+  MPI_Allreduce(MPI_IN_PLACE, &lmin, 1, MPI_DLONG, MPI_MIN, platform->comm.mpiComm());
+  MPI_Allreduce(MPI_IN_PLACE, &lmax, 1, MPI_DLONG, MPI_MAX, platform->comm.mpiComm());
+  MPI_Allreduce(MPI_IN_PLACE, &lsum, 1, MPI_DLONG, MPI_SUM, platform->comm.mpiComm());
+  if (platform->comm.mpiRank() == 0) {
+    printf("fieldExtract(%s): nPoints=%lld  local(min/max/avg)=%lld/%lld/%.1f\n",
+           fileName.c_str(),
+           (long long)numPoints,
+           (long long)lmin,
+           (long long)lmax,
+           (double)lsum / platform->comm.mpiCommSize());
+    fflush(stdout);
+  }
 }
 
 inline fieldExtract::fieldExtract(mesh_t *mesh,
@@ -534,7 +564,7 @@ inline fieldExtract::avgGs_t &fieldExtract::setupAvgGs(const std::array<bool, 3>
 
 inline void fieldExtract::interpolate()
 {
-  platform->timer.tic("fieldExtractnek::interpolate");
+  platform->timer.tic("fieldExtract::interpolate");
   auto o_wrk = platform->deviceMemoryPool.reserve<dfloat>(numPointsLocal);
   std::vector<dfloat> wrk(numPointsLocal);
 
@@ -553,19 +583,20 @@ inline void fieldExtract::interpolate()
     }
     ifld++;
   }
-  platform->timer.toc("fieldExtractnek::interpolate");
+  platform->timer.toc("fieldExtract::interpolate");
 }
 
 inline void
 fieldExtract::writeVts(const GridView &v, const std::string &fname, const double time, const int tstep)
 {
+  platform->timer.tic("fieldExtract::io");
+
   MPI_Comm mpi_comm = platform->comm.mpiComm();
   const int rank = platform->comm.mpiRank();
 
-  // Local point offset in the global point ordering.
-  const long long int pOffset = v.nScan;
+  const long long int pOffset = v.nScan; // this rank's first point, global ordering
 
-  // Remove old file / truncate cleanly before MPI-IO opens it.
+  // truncate cleanly before MPI-IO opens it
   if (rank == 0) {
     std::ofstream file(fname, std::ios::binary | std::ios::trunc);
     file.close();
@@ -609,15 +640,8 @@ fieldExtract::writeVts(const GridView &v, const std::string &fname, const double
   constexpr long long int dim = 3;
   constexpr long long int headerBytes = sizeof(unsigned long long int);
 
-  // ---------------------------------------------------------------------------
-  // Compute VTK appended-data offsets.
-  //
-  // These offsets are relative to the byte immediately after the "_" marker.
-  // Each appended block is:
-  //
-  //   [UInt64 nbytes][raw float data]
-  //
-  // ---------------------------------------------------------------------------
+  // appended-data offsets (relative to the byte after "_"); each block is
+  // [UInt64 nbytes][raw float data]
   long long int vtsOffset = 0;
 
   const long long int posVtsOffset = vtsOffset;
@@ -636,9 +660,7 @@ fieldExtract::writeVts(const GridView &v, const std::string &fname, const double
 
   const long long int totalAppendedBytes = vtsOffset;
 
-  // ---------------------------------------------------------------------------
-  // Write XML header.
-  // ---------------------------------------------------------------------------
+  // XML header
   std::string message;
   message += indent(0) + "<VTKFile type=\"StructuredGrid\" version=\"1.0\" "
                          "byte_order=\"LittleEndian\" header_type=\"UInt64\">\n";
@@ -689,12 +711,7 @@ fieldExtract::writeVts(const GridView &v, const std::string &fname, const double
 
   MPI_Barrier(mpi_comm);
 
-  // ---------------------------------------------------------------------------
-  // Helper: write one appended VTK block.
-  //
-  // vtkOffset is relative to appendedStart, i.e. immediately after "_".
-  // ---------------------------------------------------------------------------
-
+  // write one appended VTK block (vtkOffset is relative to appendedStart, i.e. after "_")
   auto writeField = [&](const MPI_Offset vtkOffset, const int nComponents, const std::vector<float> &field) {
     const unsigned long long int nbytes = static_cast<unsigned long long int>(nComponents) *
                                           static_cast<unsigned long long int>(v.nGlobal) * sizeof(float);
@@ -748,7 +765,7 @@ fieldExtract::writeVts(const GridView &v, const std::string &fname, const double
     ifld++;
   }
 
-  // Write XML footer at the exact end of appended data.
+  // XML footer at the exact end of appended data
   const std::string footer = "\n  </AppendedData>\n"
                              "</VTKFile>\n";
 
@@ -761,6 +778,8 @@ fieldExtract::writeVts(const GridView &v, const std::string &fname, const double
   MPI_Barrier(mpi_comm);
 
   MPI_File_close(&file_out);
+
+  platform->timer.toc("fieldExtract::io");
 }
 
 inline void fieldExtract::process(const double time, const int tstep)
@@ -775,7 +794,6 @@ inline void fieldExtract::process(const double time, const int tstep)
   const int nx = boxDims[0];
   const int ny = (boxDim > 1) ? boxDims[1] : 1;
   const int nz = (boxDim > 2) ? boxDims[2] : 1;
-  const std::string tag = (boxDim == 1) ? "Line" : (boxDim == 2) ? "Plane" : "Box";
 
   GridView v{std::array<int, 3>{nx, ny, nz},
              distCode,
@@ -790,9 +808,7 @@ inline void fieldExtract::process(const double time, const int tstep)
              point0,
              point1};
 
-  std::ostringstream output;
-  output << fileName << tag << std::setw(5) << std::setfill('0') << out_step << ".vts";
-  writeVts(v, output.str(), time, tstep);
+  writeVts(v, outName(fileName, out_step), time, tstep);
 }
 
 inline void
@@ -838,13 +854,13 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
   const int nx = n[0], ny = n[1], nz = n[2];
   const int nxy = nx * ny;
 
-  // canonical direction tag (x,y,z order)
-  std::string dirTag;
+  std::string dirTag; // averaged axes in x,y,z order
   for (int a = 0; a < 3; a++) {
     if (avg[a]) {
       dirTag += "xyz"[a];
     }
   }
+  const std::string modeTag = (mode == "gather") ? "g" : "gs";
 
   // reduced grid: averaged axes collapse to 1
   const int rn[3] = {avg[0] ? 1 : nx, avg[1] ? 1 : ny, avg[2] ? 1 : nz};
@@ -856,19 +872,29 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
   const dlong rLocal = ags.rLocal;
   const dlong rScan = ags.rScan;
 
-  // fresh field values on the box
+  if (!avgAnnounced) {
+    avgAnnounced = true;
+    if (platform->comm.mpiRank() == 0) {
+      printf("fieldExtract(%s): doAvg dir=%s mode=%s nReduced=%lld\n",
+             fileName.c_str(),
+             dirTag.c_str(),
+             mode.c_str(),
+             (long long)rN);
+      fflush(stdout);
+    }
+  }
+
+  platform->timer.tic("fieldExtract::avg");
   interpolate();
 
-  int nComp = 0; // total number of scalar components over all fields
+  int nComp = 0; // total scalar components over all fields
   for (auto &entry : userFieldList) {
     nComp += std::get<1>(entry).size();
   }
 
-  // local pre-reduction: accumulate quadrature-weighted partial sums into the
-  // per-cell slots (one gs vector of length nTotal per component); the
-  // reduced-grid tail entries contribute zero. axisWeight comes from setupAxes
-  // (trapezoid for uniform axes, GLL quadrature for GLL axes) and is normalized
-  // per axis, so the gs sum IS the average -- no denominator needed.
+  // Accumulate quadrature-weighted partial sums into the per-cell slots (one gs
+  // vector of length nTotal per component; tail entries start at zero). axisWeight
+  // is normalized per axis, so after the gs the sum IS the average.
   std::vector<dfloat> wrk(static_cast<size_t>(nComp) * nTotal, 0.0);
   {
     int comp = 0, ifld = 0;
@@ -898,17 +924,15 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
     }
   }
 
-  // sum the partial sums of all ranks sharing a reduced cell; the total is
-  // scattered back to every member (slots AND reduced-grid tail)
+  // combine partial sums across ranks; the total scatters back to every member
   oogs::startFinish(wrk.data(), nComp, nTotal, ogsDfloat, ogsAdd, ags.gsh);
+  platform->timer.toc("fieldExtract::avg");
 
-  // output stream name + per-stream counter
-  const std::string stem = fileName + "_avg" + dirTag;
-  const int out_step = ++avgCounter[stem + "_" + mode];
+  const std::string stem = fileName + "_avg" + dirTag + "_" + modeTag;
+  const int out_step = ++avgCounter[stem];
 
   if (mode == "gather-scatter") {
-    // scatter each point's cell average back through pointSlot
-    // (reuse box coords/dims/split)
+    // scatter each point's cell average back through pointSlot (reuse box grid)
     std::vector<float> sdata(fldDataOffsetScan[Nfields]);
     int comp = 0, ifld = 0;
     for (const auto &entry : userFieldList) {
@@ -923,7 +947,6 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
       ifld++;
     }
 
-    const std::string tag = (boxDim == 1) ? "Line" : (boxDim == 2) ? "Plane" : "Box";
     GridView v{std::array<int, 3>{nx, ny, nz},
                distCode,
                numPoints,
@@ -936,16 +959,12 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
                fldDataOffsetScan,
                point0,
                point1};
-    std::ostringstream output;
-    output << stem << tag << std::setw(5) << std::setfill('0') << out_step << ".vts";
-    writeVts(v, output.str(), time, tstep);
+    writeVts(v, outName(stem, out_step), time, tstep);
     return;
   }
 
-  // mode == "gather": emit the collapsed grid; the tail entries of wrk are the
-  // reduced grid, already in the pointDistribution(rN) split across ranks.
-  // Surviving axes keep their setupAxes coordinates; collapsed axes sit at the
-  // box midpoint.
+  // mode == "gather": emit the collapsed grid (the wrk tail, already in the
+  // reduced-grid split). Surviving axes keep their coords; collapsed axes -> midpoint.
   const dfloat mid[3] = {static_cast<dfloat>(0.5) * (point0[0] + point1[0]),
                          static_cast<dfloat>(0.5) * (point0[1] + point1[1]),
                          static_cast<dfloat>(0.5) * (point0[2] + point1[2])};
@@ -987,14 +1006,6 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
     }
   }
 
-  int eff = 0;
-  for (int a = 0; a < 3; a++) {
-    if (rn[a] > 1) {
-      eff++;
-    }
-  }
-  const std::string tag = (eff == 0) ? "Point" : (eff == 1) ? "Line" : (eff == 2) ? "Plane" : "Box";
-
   // collapsed axes are trivially uniform (single point)
   const std::array<int, 3> rDist{avg[0] ? 0 : distCode[0],
                                  avg[1] ? 0 : distCode[1],
@@ -1012,9 +1023,7 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
              rLocalOffset,
              point0,
              point1};
-  std::ostringstream output;
-  output << stem << tag << std::setw(5) << std::setfill('0') << out_step << ".vts";
-  writeVts(v, output.str(), time, tstep);
+  writeVts(v, outName(stem, out_step), time, tstep);
 }
 
 #endif // nekrs_field_extract_hpp_

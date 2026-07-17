@@ -14,14 +14,14 @@ MPI ranks; the `.vts` files are read back and validated in Python.
 |------|---------|
 | `fieldExtract.hpp` | The sampler (header-only; copy into a NekRS case). |
 | `turbPipe_t1.udf` | **Clean minimal example** — a single box sampler. Start here. |
-| `turbPipe.udf` | **All-modes test driver** — six samplers (box 1d/2d/3d, line, plane, cylinder). |
+| `turbPipe.udf` | **All-modes test driver** — samplers box 1d/2d/3d, cylinder, GLL box. |
 | `turbPipe.{par,re2,usr}` | Rest of the runnable NekRS case. |
 | `fe_read.py` | Shared Python loader + analytic validators (`load`, `check`, `ref_vz`, `ref_T`, `trap_avg`, `check_avg`). |
-| `test_<cfg>.py` | Per-config validators: `test_box1d/box2d/box3d/line/plane/cyl/box3dgll.py`. |
+| `test_<cfg>.py` | Per-config validators: `test_box1d/box2d/box3d/cyl/box3dgll.py`. |
 | `test_avg.py` | Validates the `doAvg` outputs against numpy weighted averages of the source boxes. |
 | `test_gll_quadrature.py` | Pure-python GLL quadrature tests (zwgll sanity, GLL vs trapezoid accuracy); runs without NekRS. |
-| `test_gll_viz.py` | Pcolor + mesh of the `box3dgll_avgyPlane*` x-z GLL plane — the grid clustering is visible by eye (`test_gll_viz.png`). |
-| `test_viz.py` | Visualize all six samplers in one figure. |
+| `test_gll_viz.py` | Pcolor + mesh of the `box3d_gll_avgy_g*` x-z GLL plane — the grid clustering is visible by eye (`test_gll_viz.png`). |
+| `test_viz.py` | Visualize the samplers in one figure. |
 | `test.py` | Original single-`.vts` reader / plotting example. |
 
 > Note: the clean example is on disk as **`turbPipe_t1.udf`** (you referred to it as
@@ -55,8 +55,8 @@ fieldExtract(mesh, boxDims, fldList, fname, x0, x1, {"gll", "gll", "uniform"}); 
 fieldExtract(mesh, boxDims, fldList, fname, XYZ);
 ```
 
-- `boxDims` — point counts `{nx, ny, nz}`, endpoints included. Its **size** picks the
-  output kind: `1 -> Line`, `2 -> Plane`, `3 -> Box`.
+- `boxDims` — point counts `{nx, ny, nz}`, endpoints included. Size 1/2/3 gives a
+  line/plane/box; the shape is recorded in the `.vts` (no filename tag).
 - `pointDist` (box mode, optional) — per-axis point distribution, `"uniform"`
   (default) or `"gll"` (Gauss-Lobatto-Legendre, endpoints included, clustered toward
   the interval ends). One entry applies to all axes; otherwise the size must match
@@ -66,8 +66,8 @@ fieldExtract(mesh, boxDims, fldList, fname, XYZ);
 - `fldList` — `std::vector<fieldExtract::field>`, where
   `field = std::tuple<std::string, std::vector<deviceMemory<dfloat>>>` (name + one device
   array per component; e.g. a scalar has one, a vector has three).
-- `fname` — output prefix. Files are written as `<fname><Tag>NNNNN.vts`, where `Tag` is
-  `Line`/`Plane`/`Box` and `NNNNN` is the 1-based dump counter.
+- `fname` — output prefix. Files are `<fname>[_gll]NNNNN.vts`, where `_gll` is appended
+  automatically when any axis uses GLL and `NNNNN` is the 1-based dump counter.
 - Grid points use lexicographic `(nz, ny, nx)` ordering.
 
 Points mode requires each rank to pass exactly its local share of the points. Use the
@@ -95,9 +95,9 @@ sampler->doAvg(time, tstep, avgDir, "gather-scatter");
   - `"gather-scatter"` — broadcast the average back onto the **original** box dims
     (same grid shape as `process()` output; handy for diffing against the
     instantaneous field).
-- Output: `<fname>_avg<dir><Tag>NNNNN.vts`, where `Tag` reflects the **output** grid
-  (`Point`/`Line`/`Plane`/`Box`) and `NNNNN` is a per-(dir, mode) counter. E.g. a 3D box
-  `"xy"` gather average yields `<fname>_avgxyLine*.vts` (a z-profile).
+- Output: `<fname>[_gll]_avg<dir>_<g|gs>NNNNN.vts` (`g`=gather, `gs`=gather-scatter),
+  `NNNNN` a per-(dir, mode) counter. E.g. a 3D box `"xy"` gather average yields
+  `<fname>_avgxy_g*.vts` (a z-profile).
 
 It is an **integral average over the sampling grid** using the quadrature rule that
 matches each axis's point distribution — trapezoid (endpoints half weight, normalized
@@ -139,19 +139,17 @@ void UDF_ExecuteStep(double time, int tstep)
 
 ### All-modes test driver (`turbPipe.udf`)
 
-Six samplers sharing one `fldList`, each with its own `fname` prefix, all reset on
-`nrs->lastStep`. The `cyl` sampler builds a cylindrical `r-θ-z` grid and feeds it through
-**points mode** using `pointDistribution` + the same `(nz, nθ, nr)` ordering.
+Five samplers sharing one `fldList`, each reset on `nrs->lastStep`. The `cyl` sampler
+builds a cylindrical `r-θ-z` grid and feeds it through **points mode** using
+`pointDistribution` + the same `(nz, nθ, nr)` ordering.
 
-| sampler | mode   | boxDims     | geometry                                   | output          |
-|---------|--------|-------------|--------------------------------------------|-----------------|
-| box1d   | box    | `{1,1,41}`  | line along z (x=0.1, y=0)                   | `box1dBox*.vts`   |
-| box2d   | box    | `{11,1,41}` | XZ plane (y=0)                             | `box2dBox*.vts`   |
-| box3d   | box    | `{11,7,21}` | full box                                   | `box3dBox*.vts`   |
-| line    | box    | `{41}`      | X-line (y=0, z=3)                          | `lineLine*.vts`   |
-| plane   | box    | `{11,11}`   | XY plane (z=3)                            | `planePlane*.vts` |
-| cyl     | points | `{6,9,11}`  | r∈[0.05,0.45], θ∈[0,π/2], z∈[2,4]          | `cylBox*.vts`     |
-| box3dgll| box    | `{11,7,21}` | same box as box3d, **GLL points** (`{"gll"}`) | `box3dgllBox*.vts` |
+| sampler   | mode   | boxDims     | geometry                                   | output          |
+|-----------|--------|-------------|--------------------------------------------|-----------------|
+| box1d     | box    | `{1,1,41}`  | line along z (x=0.1, y=0)                   | `box1d*.vts`     |
+| box2d     | box    | `{11,1,41}` | XZ plane (y=0)                             | `box2d*.vts`     |
+| box3d     | box    | `{11,7,21}` | full box                                   | `box3d*.vts`     |
+| cyl       | points | `{6,9,11}`  | r∈[0.05,0.45], θ∈[0,π/2], z∈[2,4]          | `cyl*.vts`       |
+| box3d+gll | box    | `{11,7,21}` | box3d extents, **GLL points** (`{"gll"}`)  | `box3d_gll*.vts` |
 
 All regions stay inside the pipe (R=0.5) and within z∈[2,4] so every point is found.
 
@@ -160,13 +158,12 @@ averages:
 
 | call | mode | output |
 |------|------|--------|
-| `feBox3d->doAvg(time, tstep, "xy")` | gather | `box3d_avgxyLine*.vts` (z-profile) |
-| `feBox3d->doAvg(time, tstep, "z", "gather-scatter")` | gather-scatter | `box3d_avgzBox*.vts` |
-| `feBox3d->doAvg(time, tstep, "xyz")` | gather | `box3d_avgxyzPoint*.vts` |
-| `fePlane->doAvg(time, tstep, "y")` | gather | `plane_avgyLine*.vts` |
-| `feBox3dGll->doAvg(time, tstep, "xy")` | gather (GLL weights) | `box3dgll_avgxyLine*.vts` |
-| `feBox3dGll->doAvg(time, tstep, "z", "gather-scatter")` | gather-scatter (GLL weights) | `box3dgll_avgzBox*.vts` |
-| `feBox3dGll->doAvg(time, tstep, "y")` | gather (GLL weights) | `box3dgll_avgyPlane*.vts` (x-z GLL plane) |
+| `feBox3d->doAvg(time, tstep, "xy")` | gather | `box3d_avgxy_g*.vts` (z-profile) |
+| `feBox3d->doAvg(time, tstep, "z", "gather-scatter")` | gather-scatter | `box3d_avgz_gs*.vts` |
+| `feBox3d->doAvg(time, tstep, "xyz")` | gather | `box3d_avgxyz_g*.vts` |
+| `feBox3dGll->doAvg(time, tstep, "xy")` | gather (GLL weights) | `box3d_gll_avgxy_g*.vts` |
+| `feBox3dGll->doAvg(time, tstep, "z", "gather-scatter")` | gather-scatter (GLL weights) | `box3d_gll_avgz_gs*.vts` |
+| `feBox3dGll->doAvg(time, tstep, "y")` | gather (GLL weights) | `box3d_gll_avgy_g*.vts` (x-z GLL plane) |
 
 ---
 
@@ -183,7 +180,7 @@ Validate one config (picks the latest matching `.vts`, or pass a filename):
 
 ```bash
 python test_box3d.py            # prints relerr(vz), relerr(temp) and PASS/FAIL
-python test_cyl.py cylBox00003.vts
+python test_cyl.py cyl00003.vts
 ```
 
 Each `test_<cfg>.py` calls `fe_read.check(...)`, which loads the file, compares `vz`/`temp`
@@ -207,7 +204,7 @@ GLL-specific tests:
 
 ```bash
 python test_gll_quadrature.py  # pure python, no NekRS run needed
-python test_box3dgll.py        # GLL node positions + field values of box3dgllBox*.vts
+python test_box3dgll.py        # GLL node positions + field values of box3d_gll*.vts
 python test_gll_viz.py [field] # writes test_gll_viz.png (pcolor + mesh of the y-avg GLL plane)
 ```
 
@@ -216,7 +213,7 @@ compares GLL quadrature with the trapezoid rule on the analytic fields: both agr
 within discretization error, GLL error ≤ trapezoid error, and GLL is exact (~1e-16)
 for the polynomial `vz`.
 
-### Visualize all six
+### Visualize the samplers
 
 ```bash
 python test_viz.py            # field defaults to "vz"
@@ -251,6 +248,21 @@ dimensionality — **1D → line, 2D → colormap, 3D → scatter** — titling 
 `doAvg` files use the same layout; `boxDims` describes the **output** grid (averaged
 axes collapse to 1 in gather mode, stay at full size in gather-scatter mode), while
 `x0`/`x1` keep the original box corners.
+
+---
+
+## Runtime output
+
+Each sampler prints one line at setup (rank 0), e.g.
+
+```
+fieldExtract(box3d): nPoints=1617  local(min/max/avg)=200/203/202.1
+fieldExtract(box3d_gll): nPoints=1617  local(min/max/avg)=200/203/202.1
+```
+
+and one line the first time `doAvg` runs on it (`dir`, `mode`, reduced point count).
+Wall time is reported through the NekRS timer under `fieldExtract::` — `setup`,
+`interpolate`, `avg`, `io` — so it shows up in the standard end-of-run timing summary.
 
 ---
 

@@ -15,14 +15,13 @@ import fe_read
 
 # (avg glob, source glob, axes, mode)
 CASES = [
-    ("box3d_avgxyLine*.vts", "box3dBox*.vts", "xy", "gather"),
-    ("box3d_avgzBox*.vts", "box3dBox*.vts", "z", "gather-scatter"),
-    ("box3d_avgxyzPoint*.vts", "box3dBox*.vts", "xyz", "gather"),
-    ("plane_avgyLine*.vts", "planePlane*.vts", "y", "gather"),
+    ("box3d_avgxy_g*.vts", "box3d[0-9]*.vts", "xy", "gather"),
+    ("box3d_avgz_gs*.vts", "box3d[0-9]*.vts", "z", "gather-scatter"),
+    ("box3d_avgxyz_g*.vts", "box3d[0-9]*.vts", "xyz", "gather"),
     # GLL box (Plan D): same reductions, GLL quadrature weights
-    ("box3dgll_avgxyLine*.vts", "box3dgllBox*.vts", "xy", "gather"),
-    ("box3dgll_avgzBox*.vts", "box3dgllBox*.vts", "z", "gather-scatter"),
-    ("box3dgll_avgyPlane*.vts", "box3dgllBox*.vts", "y", "gather"),
+    ("box3d_gll_avgxy_g*.vts", "box3d_gll[0-9]*.vts", "xy", "gather"),
+    ("box3d_gll_avgz_gs*.vts", "box3d_gll[0-9]*.vts", "z", "gather-scatter"),
+    ("box3d_gll_avgy_g*.vts", "box3d_gll[0-9]*.vts", "y", "gather"),
 ]
 
 

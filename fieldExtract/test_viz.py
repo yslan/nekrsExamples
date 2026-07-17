@@ -1,8 +1,8 @@
-"""Visualize all six fieldExtract samplers in one figure.
+"""Visualize the fieldExtract samplers in one figure.
 
 Usage:  python test_viz.py [field]      # field defaults to "vz" (also try "temp")
 
-Loads the latest .vts for each config (box1d/box2d/box3d/line/plane/cyl) via fe_read,
+Loads the latest .vts for each config (box1d/box2d/box3d/cyl/box3d_gll) via fe_read,
 and picks a view by effective dimensionality:
   1D -> line plot,  2D -> pcolormesh,  3D -> 3D scatter.
 Writes test_viz_<field>.png and shows it if a display is available.
@@ -22,12 +22,11 @@ import matplotlib.pyplot as plt
 import fe_read
 
 CONFIGS = [
-    ("box1d", "box1dBox*.vts"),
-    ("box2d", "box2dBox*.vts"),
-    ("box3d", "box3dBox*.vts"),
-    ("line", "lineLine*.vts"),
-    ("plane", "planePlane*.vts"),
-    ("cyl", "cylBox*.vts"),
+    ("box1d", "box1d[0-9]*.vts"),
+    ("box2d", "box2d[0-9]*.vts"),
+    ("box3d", "box3d[0-9]*.vts"),
+    ("cyl", "cyl[0-9]*.vts"),
+    ("box3d_gll", "box3d_gll[0-9]*.vts"),
 ]
 
 FIELD = sys.argv[1] if len(sys.argv) > 1 else "vz"

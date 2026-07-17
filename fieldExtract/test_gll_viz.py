@@ -1,8 +1,8 @@
-"""Visualize the GLL grid via the box3dgll 1D-average output (Plan D).
+"""Visualize the GLL grid via the box3d_gll 1D-average output (Plan D).
 
 Usage:  python test_gll_viz.py [field]     # field defaults to "vz" (also try "temp")
 
-Loads the latest box3dgll_avgyPlane*.vts (feBox3dGll->doAvg("y"), gather mode:
+Loads the latest box3d_gll_avgy_g*.vts (feBox3dGll->doAvg("y"), gather mode:
 y collapses -> x-z plane on GLL points) and draws a pcolormesh whose cell edges
 sit at the node coordinates, with the nodes overlaid -- the edge clustering of
 the Gauss-Lobatto-Legendre distribution is directly visible by eye. Falls back
@@ -33,7 +33,7 @@ FIELD = sys.argv[1] if len(sys.argv) > 1 else "vz"
 
 def load_plane(field):
     """(X, Z, F, time, pointDist, src) of the y-averaged x-z plane."""
-    files = sorted(glob.glob("box3dgll_avgyPlane*.vts"))
+    files = sorted(glob.glob("box3d_gll_avgy_g*.vts"))
     if files:
         d = fe_read.load(files[-1])
         nx, ny, nz = d["dims"]

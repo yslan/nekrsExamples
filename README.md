@@ -44,3 +44,6 @@ Here we focus on porting Nek5000 functionality into NekRS
   Verify derivative operators in `opSEM::`
 
 - `ktauChannelRecycle` = recycle + k-tau
+
+- `fieldExtract`       
+  Extract 1D/2D/3D box data from Nek simulations vid pointInterpolation. distributed mem, vts format, py reader included.
