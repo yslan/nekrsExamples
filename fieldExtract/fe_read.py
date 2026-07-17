@@ -25,8 +25,11 @@ def load(fname):
     pd = grid.GetPointData()
 
     nx, ny, nz = vtk_to_numpy(fd.GetArray("boxDims")).ravel().astype(int)
+    pd_arr = fd.GetArray("pointDist")  # absent in pre-Plan-D files -> uniform
+    dist = tuple(vtk_to_numpy(pd_arr).ravel().astype(int)) if pd_arr is not None else (0, 0, 0)
     out = {
         "dims": (int(nx), int(ny), int(nz)),
+        "pointDist": dist,  # per-axis code: 0 uniform, 1 GLL
         "time": vtk_to_numpy(fd.GetArray("TimeValue")).ravel().item(),
         "X": pts[:, 0],
         "Y": pts[:, 1],
@@ -71,27 +74,104 @@ def check(fname, tol=1e-2):
     return ok
 
 
-def trap_avg(F, dims, axes):
-    """Trapezoidal average of flat field F (dims=(nx,ny,nz)) over axes in 'xyz'.
+def zwgll(n):
+    """GLL nodes/weights on [-1,1] (n points). Ported from the sem_core
+    quadrature.py template (zwgll): zeros of L'_{n-1} plus the endpoints,
+    Newton iteration from Chebyshev initial guesses."""
+    N = n - 1
+    tol = 1e-15
 
-    Mirrors fieldExtract::doAvg: endpoints half weight, normalized by (n-1) per
-    averaged axis. Returns shape (nz', ny', nx') with averaged axes kept as 1.
+    z = np.zeros(n)
+    w = np.zeros(n)
+
+    w0 = 2.0 / (N * n)
+    z[0], z[N] = -1.0, 1.0
+    w[0], w[N] = w0, w0
+
+    # initial guess = Chebyshev nodes
+    cheby = np.array([np.cos((2 * k + 1) * np.pi / (2 * n)) for k in range(n)])
+    cheby = cheby[::-1]
+
+    for i in range(1, N):
+        x = cheby[i]
+        dx = np.inf
+        it = 0
+        while np.abs(dx) > tol and it < 10:
+            it += 1
+
+            # compute p = L(x), pp = L'(x), ppp = L''(x) via the recurrence
+            pk1, pk0 = 1.0, x  # p_{k}, p_{k-1}
+            ppk1, ppk0 = 0.0, 1.0
+            pppk1, pppk0 = 0.0, 0.0
+            for k in range(1, n - 1):
+                k1, k2 = k + 1, 2 * k + 1
+                p = (k2 * x * pk0 - k * pk1) / k1
+                pp = (k2 * (x * ppk0 + pk0) - k * ppk1) / k1
+                ppp = (k2 * (x * pppk0 + 2 * ppk0) - k * pppk1) / k1
+
+                pk1, ppk1, pppk1 = pk0, ppk0, pppk0
+                pk0, ppk0, pppk0 = p, pp, ppp
+
+            # newton
+            dx = -pp / ppp
+            x = x + dx
+
+        z[i] = x
+        w[i] = 2.0 / ((n - 1) * n * p**2)
+    return z, w
+
+
+def axis_weights(n, code):
+    """Normalized (sum=1) per-axis averaging weights, matching fieldExtract:
+    code 0 -> trapezoid/(n-1); code 1 -> GLL quadrature w/2."""
+    if n == 1:
+        return np.array([1.0])
+    if code == 1:
+        return 0.5 * zwgll(n)[1]
+    w = np.ones(n)
+    w[0] = w[-1] = 0.5
+    return w / (n - 1)
+
+
+def axis_nodes_weights(n, code, a, b):
+    """Per-axis node coordinates on [a,b] + normalized weights, matching
+    fieldExtract::setupAxes (code 0 uniform, 1 GLL mapped from [-1,1])."""
+    if n == 1:
+        return np.array([a]), np.array([1.0])
+    if code == 1:
+        z, w = zwgll(n)
+        return a + 0.5 * (z + 1.0) * (b - a), 0.5 * w
+    return np.linspace(a, b, n), axis_weights(n, 0)
+
+
+def grid_avg(F, dims, axes, dist=(0, 0, 0)):
+    """Weighted average of flat field F (dims=(nx,ny,nz)) over axes in 'xyz',
+    using the per-axis weights implied by dist (0 uniform/trapezoid, 1 GLL).
+
+    Mirrors fieldExtract::doAvg. Returns shape (nz', ny', nx') with averaged
+    axes kept as 1.
     """
     nx, ny, nz = dims
     A = np.asarray(F, dtype=np.float64).reshape((nz, ny, nx))
     for ax in axes.lower():
-        axis = {"x": 2, "y": 1, "z": 0}[ax]
+        ia = {"x": 0, "y": 1, "z": 2}[ax]
+        axis = 2 - ia  # numpy axis in the (nz, ny, nx) layout
         n = A.shape[axis]
-        w = np.ones(n)
-        w[0] = w[-1] = 0.5
+        w = axis_weights(n, dist[ia])
         shape = [1, 1, 1]
         shape[axis] = n
-        A = (A * w.reshape(shape)).sum(axis=axis, keepdims=True) / (n - 1)
+        A = (A * w.reshape(shape)).sum(axis=axis, keepdims=True)
     return A
 
 
+def trap_avg(F, dims, axes):
+    """Trapezoidal average (uniform grids) — grid_avg with all-uniform dist."""
+    return grid_avg(F, dims, axes, dist=(0, 0, 0))
+
+
 def check_avg(avg_fname, src_fname, axes, mode, tol=1e-5):
-    """Compare an _avg .vts against the numpy trapezoid-average of its source box .vts.
+    """Compare an _avg .vts against the numpy weighted average of its source box
+    .vts (weights from the source file's pointDist: trapezoid or GLL).
 
     Exercises the exact contract of fieldExtract::doAvg (same grid, same weights),
     so tol is tight -- limited only by float32 storage / summation order.
@@ -102,7 +182,7 @@ def check_avg(avg_fname, src_fname, axes, mode, tol=1e-5):
     ok = True
     errs = []
     for key in ("vz", "temp"):
-        ref = trap_avg(ds[key], ds["dims"], axes)
+        ref = grid_avg(ds[key], ds["dims"], axes, ds["pointDist"])
         if mode == "gather-scatter":
             ref = np.broadcast_to(ref, (nz, ny, nx))
         got = np.asarray(da[key], dtype=np.float64).reshape(ref.shape)

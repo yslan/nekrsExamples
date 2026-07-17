@@ -1,8 +1,8 @@
 // --- fieldExtract: copy the marked blocks into your own .udf --------------- //
 #include "fieldExtract.hpp" // [fieldExtract] copy the header next to your case
 
-// [fieldExtract] one global unique_ptr per sampler (box 1d/2d/3d, line, plane, cylinder)
-std::unique_ptr<fieldExtract> feBox1d, feBox2d, feBox3d, feLine, fePlane, feCyl;
+// [fieldExtract] one global unique_ptr per sampler (box 1d/2d/3d, line, plane, cylinder, GLL box)
+std::unique_ptr<fieldExtract> feBox1d, feBox2d, feBox3d, feLine, fePlane, feCyl, feBox3dGll;
 
 static dfloat zLength;
 
@@ -112,6 +112,16 @@ void UDF_Setup()
     auto XYZ = cylinderPointsLocal(nr, nt, nz, 0.05, 0.45, 0.0, M_PI / 2, 2.0, 4.0);
     feCyl = std::make_unique<fieldExtract>(mesh, std::vector<int>{nr, nt, nz}, fldList, "cyl", XYZ);
   }
+
+  // box mode with GLL (Gauss-Lobatto-Legendre) points on every axis; same extents
+  // as box3d so the two can be compared. doAvg then uses GLL quadrature weights.
+  feBox3dGll = std::make_unique<fieldExtract>(mesh,
+                                              std::vector<int>{11, 7, 21},
+                                              fldList,
+                                              "box3dgll",
+                                              std::array<dfloat, 3>{-0.3, -0.3, 2.0},
+                                              std::array<dfloat, 3>{0.3, 0.3, 4.0},
+                                              std::vector<std::string>{"gll"});
 }
 
 void test_sol(double time, int tstep)
@@ -155,6 +165,7 @@ void UDF_ExecuteStep(double time, int tstep)
     feLine->process(time, tstep);
     fePlane->process(time, tstep);
     feCyl->process(time, tstep);
+    feBox3dGll->process(time, tstep);
 
     // [fieldExtract] spatial averages (box mode only): "gather" collapses the
     // averaged axes; "gather-scatter" broadcasts the average back onto the box
@@ -162,6 +173,11 @@ void UDF_ExecuteStep(double time, int tstep)
     feBox3d->doAvg(time, tstep, "z", "gather-scatter"); // -> box3d_avgzBox*.vts
     feBox3d->doAvg(time, tstep, "xyz");                 // -> box3d_avgxyzPoint*.vts
     fePlane->doAvg(time, tstep, "y");                   // -> plane_avgyLine*.vts
+
+    // GLL sampler: same averages via GLL quadrature weights
+    feBox3dGll->doAvg(time, tstep, "xy");                  // -> box3dgll_avgxyLine*.vts
+    feBox3dGll->doAvg(time, tstep, "z", "gather-scatter"); // -> box3dgll_avgzBox*.vts
+    feBox3dGll->doAvg(time, tstep, "y");                   // -> box3dgll_avgyPlane*.vts (x-z GLL plane)
   }
 
   // [fieldExtract] release before MPI_Finalize (frees the findpts MPI comm);
@@ -173,5 +189,6 @@ void UDF_ExecuteStep(double time, int tstep)
     feLine.reset();
     fePlane.reset();
     feCyl.reset();
+    feBox3dGll.reset();
   }
 }

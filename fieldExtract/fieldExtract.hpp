@@ -9,15 +9,20 @@
 // last step (before MPI_Finalize) so the findpts MPI comm is freed while MPI is
 // still live:  if (nrs->lastStep) { sampler.reset(); }
 //
-//   // Box mode: uniform grid spanning the diagonal x0 -> x1
+//   // Box mode: grid spanning the diagonal x0 -> x1
 //   fieldExtract(mesh, boxDims, fldList, fname, x0, x1);
+//   fieldExtract(mesh, boxDims, fldList, fname, x0, x1, {"gll"}); // GLL points
 //
 //   // Points mode: user-supplied coordinates (one vector per axis)
 //   fieldExtract(mesh, boxDims, fldList, fname, XYZ);
 //
-//   boxDims : point counts {nx, ny, nz}, endpoints included (1D/2D via ny/nz=1)
-//   fldList : vector of {name, {deviceMemory<dfloat> per component}}
-//   fname   : output prefix -> <fname>{Line|Plane|Box}NNNNN.vts
+//   boxDims   : point counts {nx, ny, nz}, endpoints included (1D/2D via ny/nz=1)
+//   fldList   : vector of {name, {deviceMemory<dfloat> per component}}
+//   fname     : output prefix -> <fname>{Line|Plane|Box}NNNNN.vts
+//   pointDist : optional per-axis distribution, "uniform" (default) | "gll"
+//               (Gauss-Lobatto-Legendre); 1 entry = all axes. Recorded in the
+//               .vts FieldData tag "pointDist" (0 uniform, 1 GLL) and doAvg uses
+//               the matching quadrature weights (trapezoid vs GLL).
 //
 // Average mode (box only): reduce the current fields over one or more axes and
 // dump one .vts. Implemented as a custom integer-id gather-scatter (gslib/oogs,
@@ -52,13 +57,17 @@ class fieldExtract
 public:
   using field = std::tuple<std::string, std::vector<deviceMemory<dfloat>>>;
 
-  // Box mode: uniform grid spanning the diagonal x0 -> x1.
+  // Box mode: grid spanning the diagonal x0 -> x1. pointDist selects the
+  // per-axis point distribution, "uniform" (default) or "gll"
+  // (Gauss-Lobatto-Legendre); one entry applies to all axes, otherwise its size
+  // must match boxDims. doAvg uses the matching quadrature weights.
   fieldExtract(mesh_t *mesh,
                const std::vector<int> &boxDims,
                const std::vector<field> &fldList,
                const std::string fileName,
                const std::array<dfloat, 3> &x0,
-               const std::array<dfloat, 3> &x1);
+               const std::array<dfloat, 3> &x1,
+               const std::vector<std::string> &pointDist = {});
 
   // Points mode: user-supplied coordinates (one vector per axis).
   fieldExtract(mesh_t *mesh,
@@ -103,6 +112,13 @@ private:
   std::vector<dfloat> xCoord, yCoord, zCoord;
   std::vector<size_t> fldDataOffsetScan; // per-field offset into fldData
 
+  // Box-mode per-axis discretization (built by setupAxes):
+  // distCode 0 = uniform, 1 = GLL; axisWeight is normalized (sums to 1 per
+  // axis) so doAvg needs no extra normalization.
+  std::array<int, 3> distCode{0, 0, 0};
+  std::array<std::vector<dfloat>, 3> axisCoord;
+  std::array<std::vector<dfloat>, 3> axisWeight;
+
   std::vector<float> fldData;
 
   bool boxMode = false; // true: box ctor (x0/x1 grid); false: points ctor
@@ -138,6 +154,11 @@ private:
                    const std::string &fileName_in);
   void finishSetup(mesh_t *mesh);
 
+  // Fill axisCoord / axisWeight / distCode for box mode (see plans/D.md).
+  void setupAxes(const std::array<dfloat, 3> &x0,
+                 const std::array<dfloat, 3> &x1,
+                 const std::vector<std::string> &pointDist);
+
   void setPoints(const std::array<dfloat, 3> &x0, const std::array<dfloat, 3> &x1);
   void setPoints(const std::array<std::vector<dfloat>, 3> &XYZ);
 
@@ -146,6 +167,7 @@ private:
   // A grid + its interpolated data to emit as one .vts (full box or averaged).
   struct GridView {
     std::array<int, 3> dims; // nx, ny, nz (1 for collapsed axes)
+    std::array<int, 3> dist; // per-axis distCode (0 uniform, 1 GLL)
     dlong nGlobal;
     dlong nLocal;
     dlong nScan;
@@ -199,18 +221,67 @@ inline void fieldExtract::pointDistribution(dlong numPoints, dlong &numLocal, dl
   offset = (rank > 0) ? rank * base + std::min(left, static_cast<dlong>(rank)) : 0;
 }
 
+inline void fieldExtract::setupAxes(const std::array<dfloat, 3> &x0,
+                                    const std::array<dfloat, 3> &x1,
+                                    const std::vector<std::string> &pointDist)
+{
+  nekrsCheck(pointDist.size() > 1 && static_cast<int>(pointDist.size()) != boxDim,
+             MPI_COMM_SELF,
+             EXIT_FAILURE,
+             "pointDist has %zu entries; use 1 (all axes) or %d (per axis)\n",
+             pointDist.size(),
+             boxDim);
+
+  for (int a = 0; a < 3; a++) {
+    const int n = (a < boxDim) ? boxDims[a] : 1;
+
+    int code = 0; // 0 = uniform
+    if (!pointDist.empty() && a < boxDim) {
+      const auto s = upperCase(pointDist.size() == 1 ? pointDist[0] : pointDist[a]);
+      code = (s == "UNIFORM") ? 0 : (s == "GLL") ? 1 : -1;
+      nekrsCheck(code < 0,
+                 MPI_COMM_SELF,
+                 EXIT_FAILURE,
+                 "invalid pointDist '%s' (use uniform|gll)\n",
+                 s.c_str());
+    }
+    if (n < 2) {
+      code = 0; // singleton axes are trivially uniform
+    }
+    distCode[a] = code;
+
+    // normalized weights (sum to 1) so doAvg needs no extra normalization
+    auto &coord = axisCoord[a];
+    auto &wght = axisWeight[a];
+    coord.resize(n);
+    wght.resize(n);
+    if (n == 1) {
+      coord[0] = x0[a];
+      wght[0] = 1.0;
+    } else if (code == 0) { // uniform + trapezoid weights
+      const dfloat dx = (x1[a] - x0[a]) / (n - 1);
+      for (int i = 0; i < n; i++) {
+        coord[i] = x0[a] + i * dx;
+        wght[i] = ((i == 0 || i == n - 1) ? 0.5 : 1.0) / (n - 1);
+      }
+    } else { // GLL nodes + quadrature weights, mapped from [-1,1] to [x0,x1]
+      std::vector<dfloat> z(n), w(n);
+      JacobiGLL(n - 1, z.data(), w.data());
+      for (int i = 0; i < n; i++) {
+        coord[i] = x0[a] + 0.5 * (z[i] + 1.0) * (x1[a] - x0[a]);
+        wght[i] = 0.5 * w[i]; // sum(w) = 2 on [-1,1]
+      }
+    }
+  }
+}
+
 inline void fieldExtract::setPoints(const std::array<dfloat, 3> &x0, const std::array<dfloat, 3> &x1)
 {
-  // uniform grid from x0 to x1
+  // grid from x0 to x1 following the per-axis coordinates from setupAxes
   if (numPointsLocal) {
     const int nx = boxDims[0];
     const int ny = (boxDim > 1) ? boxDims[1] : 1;
-    const int nz = (boxDim > 2) ? boxDims[2] : 1;
     const int nxy = nx * ny;
-
-    const dfloat dx = (nx > 1) ? (x1[0] - x0[0]) / (nx - 1) : 0.0;
-    const dfloat dy = (ny > 1) ? (x1[1] - x0[1]) / (ny - 1) : 0.0;
-    const dfloat dz = (nz > 1) ? (x1[2] - x0[2]) / (nz - 1) : 0.0;
 
     xCoord.resize(numPointsLocal);
     yCoord.resize(numPointsLocal);
@@ -220,9 +291,9 @@ inline void fieldExtract::setPoints(const std::array<dfloat, 3> &x0, const std::
       const dlong ig = i + numPointsScan;
       int ix, iy, iz;
       getIxyz(ig, nx, nxy, ix, iy, iz);
-      xCoord[i] = x0[0] + ix * dx;
-      yCoord[i] = x0[1] + iy * dy;
-      zCoord[i] = x0[2] + iz * dz;
+      xCoord[i] = axisCoord[0][ix];
+      yCoord[i] = axisCoord[1][iy];
+      zCoord[i] = axisCoord[2][iz];
     }
   }
 
@@ -354,12 +425,14 @@ inline fieldExtract::fieldExtract(mesh_t *mesh,
                                   const std::vector<field> &fldList,
                                   const std::string fileName_in,
                                   const std::array<dfloat, 3> &x0,
-                                  const std::array<dfloat, 3> &x1)
+                                  const std::array<dfloat, 3> &x1,
+                                  const std::vector<std::string> &pointDist)
 {
   boxMode = true;
   setupCommon(boxDims_in, fldList, fileName_in);
   point0 = x0;
   point1 = x1;
+  setupAxes(x0, x1, pointDist);
   setPoints(x0, x1);
   finishSetup(mesh);
 }
@@ -581,6 +654,7 @@ fieldExtract::writeVts(const GridView &v, const std::string &fname, const double
              "NumberOfTuples=\"1\" format=\"ascii\"> " +
              std::to_string(tstep) + " </DataArray>\n";
   message += indent(3) + fieldDataArrayInt3("boxDims", nx, ny, nz);
+  message += indent(3) + fieldDataArrayInt3("pointDist", v.dist[0], v.dist[1], v.dist[2]);
   message += indent(3) + fieldDataArrayInt64("numPoints", static_cast<long long>(v.nGlobal));
   message += indent(3) + fieldDataArrayFloat3("x0", v.p0[0], v.p0[1], v.p0[2]);
   message += indent(3) + fieldDataArrayFloat3("x1", v.p1[0], v.p1[1], v.p1[2]);
@@ -704,6 +778,7 @@ inline void fieldExtract::process(const double time, const int tstep)
   const std::string tag = (boxDim == 1) ? "Line" : (boxDim == 2) ? "Plane" : "Box";
 
   GridView v{std::array<int, 3>{nx, ny, nz},
+             distCode,
              numPoints,
              numPointsLocal,
              numPointsScan,
@@ -789,11 +864,11 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
     nComp += std::get<1>(entry).size();
   }
 
-  auto trap = [](int i, int nn) { return (nn > 1 && (i == 0 || i == nn - 1)) ? 0.5 : 1.0; };
-
-  // local pre-reduction: accumulate trapezoid-weighted partial sums into the
+  // local pre-reduction: accumulate quadrature-weighted partial sums into the
   // per-cell slots (one gs vector of length nTotal per component); the
-  // reduced-grid tail entries contribute zero
+  // reduced-grid tail entries contribute zero. axisWeight comes from setupAxes
+  // (trapezoid for uniform axes, GLL quadrature for GLL axes) and is normalized
+  // per axis, so the gs sum IS the average -- no denominator needed.
   std::vector<dfloat> wrk(static_cast<size_t>(nComp) * nTotal, 0.0);
   {
     int comp = 0, ifld = 0;
@@ -806,13 +881,13 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
           getIxyz(ig, nx, nxy, ix, iy, iz);
           dfloat w = 1.0;
           if (avg[0]) {
-            w *= trap(ix, nx);
+            w *= axisWeight[0][ix];
           }
           if (avg[1]) {
-            w *= trap(iy, ny);
+            w *= axisWeight[1][iy];
           }
           if (avg[2]) {
-            w *= trap(iz, nz);
+            w *= axisWeight[2][iz];
           }
           wrk[static_cast<size_t>(comp) * nTotal + ags.pointSlot[i]] +=
               w * fldData[fldDataOffsetScan[ifld] + d * numPointsLocal + i];
@@ -826,17 +901,6 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
   // sum the partial sums of all ranks sharing a reduced cell; the total is
   // scattered back to every member (slots AND reduced-grid tail)
   oogs::startFinish(wrk.data(), nComp, nTotal, ogsDfloat, ogsAdd, ags.gsh);
-
-  // trapezoidal normalization: product of (n_a - 1) over averaged axes
-  dfloat denom = 1.0;
-  for (int a = 0; a < 3; a++) {
-    if (avg[a]) {
-      denom *= (n[a] - 1);
-    }
-  }
-  for (auto &s : wrk) {
-    s /= denom;
-  }
 
   // output stream name + per-stream counter
   const std::string stem = fileName + "_avg" + dirTag;
@@ -861,6 +925,7 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
 
     const std::string tag = (boxDim == 1) ? "Line" : (boxDim == 2) ? "Plane" : "Box";
     GridView v{std::array<int, 3>{nx, ny, nz},
+               distCode,
                numPoints,
                numPointsLocal,
                numPointsScan,
@@ -878,22 +943,21 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
   }
 
   // mode == "gather": emit the collapsed grid; the tail entries of wrk are the
-  // reduced grid, already in the pointDistribution(rN) split across ranks
+  // reduced grid, already in the pointDistribution(rN) split across ranks.
+  // Surviving axes keep their setupAxes coordinates; collapsed axes sit at the
+  // box midpoint.
   const dfloat mid[3] = {static_cast<dfloat>(0.5) * (point0[0] + point1[0]),
                          static_cast<dfloat>(0.5) * (point0[1] + point1[1]),
                          static_cast<dfloat>(0.5) * (point0[2] + point1[2])};
-  const dfloat dcoord[3] = {(nx > 1) ? (point1[0] - point0[0]) / (nx - 1) : 0.0,
-                            (ny > 1) ? (point1[1] - point0[1]) / (ny - 1) : 0.0,
-                            (nz > 1) ? (point1[2] - point0[2]) / (nz - 1) : 0.0};
 
   std::vector<dfloat> rx(rLocal), ry(rLocal), rz(rLocal);
   for (dlong i = 0; i < rLocal; i++) {
     const dlong ig = i + rScan;
     int jx, jy, jz;
     getIxyz(ig, rn[0], rnxy, jx, jy, jz);
-    rx[i] = avg[0] ? mid[0] : point0[0] + jx * dcoord[0];
-    ry[i] = avg[1] ? mid[1] : point0[1] + jy * dcoord[1];
-    rz[i] = avg[2] ? mid[2] : point0[2] + jz * dcoord[2];
+    rx[i] = avg[0] ? mid[0] : axisCoord[0][jx];
+    ry[i] = avg[1] ? mid[1] : axisCoord[1][jy];
+    rz[i] = avg[2] ? mid[2] : axisCoord[2][jz];
   }
 
   // local reduced data slice + its offset scan
@@ -931,7 +995,13 @@ fieldExtract::doAvg(const double time, const int tstep, const std::string &avgDi
   }
   const std::string tag = (eff == 0) ? "Point" : (eff == 1) ? "Line" : (eff == 2) ? "Plane" : "Box";
 
+  // collapsed axes are trivially uniform (single point)
+  const std::array<int, 3> rDist{avg[0] ? 0 : distCode[0],
+                                 avg[1] ? 0 : distCode[1],
+                                 avg[2] ? 0 : distCode[2]};
+
   GridView v{std::array<int, 3>{rn[0], rn[1], rn[2]},
+             rDist,
              rN,
              rLocal,
              rScan,

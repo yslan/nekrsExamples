@@ -1,9 +1,10 @@
-"""Validate the doAvg outputs (Plan C).
+"""Validate the doAvg outputs (Plans C + D).
 
 For each avg family, pair the latest _avg .vts with the same-step source box .vts
-and compare against the numpy trapezoidal average of the source data (exact
-contract, tight tol). Additionally cross-check against the analytic reference
-fields trapezoid-averaged on the source grid (interp accuracy, loose tol).
+and compare against the numpy weighted average of the source data (exact
+contract, tight tol; weights follow the source file's pointDist -- trapezoid for
+uniform axes, GLL quadrature for GLL axes). Additionally cross-check against the
+analytic reference fields averaged on the source grid (interp accuracy, loose tol).
 """
 import glob
 import sys
@@ -18,11 +19,15 @@ CASES = [
     ("box3d_avgzBox*.vts", "box3dBox*.vts", "z", "gather-scatter"),
     ("box3d_avgxyzPoint*.vts", "box3dBox*.vts", "xyz", "gather"),
     ("plane_avgyLine*.vts", "planePlane*.vts", "y", "gather"),
+    # GLL box (Plan D): same reductions, GLL quadrature weights
+    ("box3dgll_avgxyLine*.vts", "box3dgllBox*.vts", "xy", "gather"),
+    ("box3dgll_avgzBox*.vts", "box3dgllBox*.vts", "z", "gather-scatter"),
+    ("box3dgll_avgyPlane*.vts", "box3dgllBox*.vts", "y", "gather"),
 ]
 
 
 def check_analytic(avg_fname, src_fname, axes, mode, tol=1e-2):
-    """Compare the avg file against the trapezoid-average of the ANALYTIC fields
+    """Compare the avg file against the weighted average of the ANALYTIC fields
     evaluated on the source grid (validates interpolation + averaging end to end)."""
     da = fe_read.load(avg_fname)
     ds = fe_read.load(src_fname)
@@ -31,7 +36,7 @@ def check_analytic(avg_fname, src_fname, axes, mode, tol=1e-2):
     ok = True
     errs = []
     for key, ref_fld in (("vz", fe_read.ref_vz(X, Y, Z, t)), ("temp", fe_read.ref_T(X, Y, Z))):
-        ref = fe_read.trap_avg(ref_fld, ds["dims"], axes)
+        ref = fe_read.grid_avg(ref_fld, ds["dims"], axes, ds["pointDist"])
         if mode == "gather-scatter":
             ref = np.broadcast_to(ref, (nz, ny, nx))
         got = np.asarray(da[key], dtype=np.float64).reshape(ref.shape)

@@ -17,8 +17,10 @@ MPI ranks; the `.vts` files are read back and validated in Python.
 | `turbPipe.udf` | **All-modes test driver** — six samplers (box 1d/2d/3d, line, plane, cylinder). |
 | `turbPipe.{par,re2,usr}` | Rest of the runnable NekRS case. |
 | `fe_read.py` | Shared Python loader + analytic validators (`load`, `check`, `ref_vz`, `ref_T`, `trap_avg`, `check_avg`). |
-| `test_<cfg>.py` | Per-config validators: `test_box1d/box2d/box3d/line/plane/cyl.py`. |
-| `test_avg.py` | Validates the `doAvg` outputs against numpy trapezoid averages of the source boxes. |
+| `test_<cfg>.py` | Per-config validators: `test_box1d/box2d/box3d/line/plane/cyl/box3dgll.py`. |
+| `test_avg.py` | Validates the `doAvg` outputs against numpy weighted averages of the source boxes. |
+| `test_gll_quadrature.py` | Pure-python GLL quadrature tests (zwgll sanity, GLL vs trapezoid accuracy); runs without NekRS. |
+| `test_gll_viz.py` | Pcolor + mesh of the `box3dgll_avgyPlane*` x-z GLL plane — the grid clustering is visible by eye (`test_gll_viz.png`). |
 | `test_viz.py` | Visualize all six samplers in one figure. |
 | `test.py` | Original single-`.vts` reader / plotting example. |
 
@@ -44,8 +46,10 @@ if (nrs->lastStep) sampler.reset();
 ### Constructors
 
 ```cpp
-// Box mode — uniform grid spanning the diagonal x0 -> x1
+// Box mode — grid spanning the diagonal x0 -> x1 (uniform points by default)
 fieldExtract(mesh, boxDims, fldList, fname, x0, x1);
+fieldExtract(mesh, boxDims, fldList, fname, x0, x1, {"gll"});            // GLL on all axes
+fieldExtract(mesh, boxDims, fldList, fname, x0, x1, {"gll", "gll", "uniform"}); // per axis
 
 // Points mode — user-supplied Cartesian coordinates (one std::vector per axis)
 fieldExtract(mesh, boxDims, fldList, fname, XYZ);
@@ -53,6 +57,12 @@ fieldExtract(mesh, boxDims, fldList, fname, XYZ);
 
 - `boxDims` — point counts `{nx, ny, nz}`, endpoints included. Its **size** picks the
   output kind: `1 -> Line`, `2 -> Plane`, `3 -> Box`.
+- `pointDist` (box mode, optional) — per-axis point distribution, `"uniform"`
+  (default) or `"gll"` (Gauss-Lobatto-Legendre, endpoints included, clustered toward
+  the interval ends). One entry applies to all axes; otherwise the size must match
+  `boxDims`. Singleton axes are trivially uniform. Nodes come from NekRS `JacobiGLL`
+  on the reference domain [-1,1], mapped by `x = x0 + (z+1)/2 (x1-x0)`; the matching
+  quadrature weights are recorded so `doAvg` integrates with the right rule.
 - `fldList` — `std::vector<fieldExtract::field>`, where
   `field = std::tuple<std::string, std::vector<deviceMemory<dfloat>>>` (name + one device
   array per component; e.g. a scalar has one, a vector has three).
@@ -89,12 +99,13 @@ sampler->doAvg(time, tstep, avgDir, "gather-scatter");
   (`Point`/`Line`/`Plane`/`Box`) and `NNNNN` is a per-(dir, mode) counter. E.g. a 3D box
   `"xy"` gather average yields `<fname>_avgxyLine*.vts` (a z-profile).
 
-It is an **integral (trapezoidal) average over the uniform sampling grid** — endpoints
-get half weight, normalized by `(n-1)` per averaged axis — not a mass-matrix average
-over the SEM mesh. Internally each call re-interpolates, pre-reduces local points into
-per-cell partial sums, and combines them across ranks with a custom integer-id
-gslib/oogs gather-scatter (ids = reduced-cell index, the same pattern as NekRS
-`planarAvg`); the handle is built once per direction, cached, and freed in the
+It is an **integral average over the sampling grid** using the quadrature rule that
+matches each axis's point distribution — trapezoid (endpoints half weight, normalized
+by `(n-1)`) on uniform axes, GLL quadrature weights on GLL axes — not a mass-matrix
+average over the SEM mesh. Internally each call re-interpolates, pre-reduces local
+points into per-cell partial sums, and combines them across ranks with a custom
+integer-id gslib/oogs gather-scatter (ids = reduced-cell index, the same pattern as
+NekRS `planarAvg`); the handle is built once per direction, cached, and freed in the
 destructor.
 
 ### Minimal example (`turbPipe_t1.udf`)
@@ -140,6 +151,7 @@ Six samplers sharing one `fldList`, each with its own `fname` prefix, all reset 
 | line    | box    | `{41}`      | X-line (y=0, z=3)                          | `lineLine*.vts`   |
 | plane   | box    | `{11,11}`   | XY plane (z=3)                            | `planePlane*.vts` |
 | cyl     | points | `{6,9,11}`  | r∈[0.05,0.45], θ∈[0,π/2], z∈[2,4]          | `cylBox*.vts`     |
+| box3dgll| box    | `{11,7,21}` | same box as box3d, **GLL points** (`{"gll"}`) | `box3dgllBox*.vts` |
 
 All regions stay inside the pipe (R=0.5) and within z∈[2,4] so every point is found.
 
@@ -152,6 +164,9 @@ averages:
 | `feBox3d->doAvg(time, tstep, "z", "gather-scatter")` | gather-scatter | `box3d_avgzBox*.vts` |
 | `feBox3d->doAvg(time, tstep, "xyz")` | gather | `box3d_avgxyzPoint*.vts` |
 | `fePlane->doAvg(time, tstep, "y")` | gather | `plane_avgyLine*.vts` |
+| `feBox3dGll->doAvg(time, tstep, "xy")` | gather (GLL weights) | `box3dgll_avgxyLine*.vts` |
+| `feBox3dGll->doAvg(time, tstep, "z", "gather-scatter")` | gather-scatter (GLL weights) | `box3dgll_avgzBox*.vts` |
+| `feBox3dGll->doAvg(time, tstep, "y")` | gather (GLL weights) | `box3dgll_avgyPlane*.vts` (x-z GLL plane) |
 
 ---
 
@@ -181,12 +196,25 @@ python test_avg.py
 ```
 
 For each avg family it pairs the latest `_avg` file with the same-step source box file
-and runs two checks per field: an **exact** check against the numpy trapezoid average
-of the source data (`fe_read.check_avg`, `tol = 1e-5` — same grid, same weights, so only
-float32 storage separates them) and an **analytic** cross-check against the trapezoid
-average of the reference fields (`tol = 1e-2`). Errors are normalized by the max of the
-*unaveraged* field, since some averages vanish by symmetry (e.g. the x-average of
-`temp ~ sin(pi x)`).
+and runs two checks per field: an **exact** check against the numpy weighted average
+of the source data (`fe_read.check_avg`, `tol = 1e-5` — same grid, same weights
+[trapezoid or GLL per the source's `pointDist`], so only float32 storage separates
+them) and an **analytic** cross-check against the weighted average of the reference
+fields (`tol = 1e-2`). Errors are normalized by the max of the *unaveraged* field,
+since some averages vanish by symmetry (e.g. the x-average of `temp ~ sin(pi x)`).
+
+GLL-specific tests:
+
+```bash
+python test_gll_quadrature.py  # pure python, no NekRS run needed
+python test_box3dgll.py        # GLL node positions + field values of box3dgllBox*.vts
+python test_gll_viz.py [field] # writes test_gll_viz.png (pcolor + mesh of the y-avg GLL plane)
+```
+
+`test_gll_quadrature.py` validates the ported `zwgll` against closed-form values and
+compares GLL quadrature with the trapezoid rule on the analytic fields: both agree
+within discretization error, GLL error ≤ trapezoid error, and GLL is exact (~1e-16)
+for the polynomial `vz`.
 
 ### Visualize all six
 
@@ -214,8 +242,9 @@ dimensionality — **1D → line, 2D → colormap, 3D → scatter** — titling 
 
 `test.py` / `fe_read.py` depend on this structure staying in sync with `fieldExtract.hpp`:
 
-- **FieldData**: `boxDims` (Int32×3), `x0`/`x1` (Float64×3), `numPoints` (Int64),
-  `TimeValue` (Float32), `CYCLE` (Int32).
+- **FieldData**: `boxDims` (Int32×3), `pointDist` (Int32×3; per-axis code, 0 uniform /
+  1 GLL — absent in pre-Plan-D files, readers default to uniform), `x0`/`x1`
+  (Float64×3), `numPoints` (Int64), `TimeValue` (Float32), `CYCLE` (Int32).
 - **Points**: `Position` (Float32×3), lexicographic `(nz, ny, nx)`.
 - **PointData**: one Float32 array per field (`NumberOfComponents` = field dim).
 
