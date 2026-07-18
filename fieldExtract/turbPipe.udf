@@ -159,6 +159,17 @@ void UDF_ExecuteStep(double time, int tstep)
     feBox3dGll->doAvg(time, tstep, "xy");                  // -> box3d_gll_avgxy_g*.vts
     feBox3dGll->doAvg(time, tstep, "z", "gather-scatter"); // -> box3d_gll_avgz_gs*.vts
     feBox3dGll->doAvg(time, tstep, "y");                   // -> box3d_gll_avgy_g*.vts (x-z GLL plane)
+
+#ifdef NEKRS_ENABLE_ADIOS
+    // [fieldExtract] ADIOS2 backend (Plan F): same sampler, format="adios" -> one
+    // .bp per stem (steps appended), carrying a VTK UnstructuredGrid schema so it
+    // opens in ParaView. Emitted alongside the .vts calls above for A/B checks.
+    // Requires NekRS built with ADIOS + a case-local udf.cmake linking adios2.
+    feBox3d->process(time, tstep, "adios");                      // -> box3d.bp
+    feBox3d->doAvg(time, tstep, "xy", "gather", "adios");        // -> box3d_avgxy_g.bp
+    feBox3d->doAvg(time, tstep, "z", "gather-scatter", "adios"); // -> box3d_avgz_gs.bp
+    feBox3d->doAvg(time, tstep, "xyz", "gather", "adios");       // -> box3d_avgxyz_g.bp
+#endif
   }
 
   // [fieldExtract] release before MPI_Finalize (frees the findpts MPI comm);

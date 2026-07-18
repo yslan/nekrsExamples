@@ -1,10 +1,13 @@
 # fieldExtract — NekRS box data sampler
 
 Header-only NekRS v26 utility. It interpolates solution fields onto a uniform
-**1D / 2D / 3D** grid of points (via `pointInterpolation_t` / findpts) and writes one VTK
-`.vts` StructuredGrid file per call through MPI-IO. Box-mode samplers can also dump
-**line / planar / box averages** (`doAvg`). Points are distributed evenly across
-MPI ranks; the `.vts` files are read back and validated in Python.
+**1D / 2D / 3D** grid of points (via `pointInterpolation_t` / findpts) and writes the
+sampled grid to disk. Two IO backends, selected per call by a trailing `format`
+argument: **`"vts"`** (default) writes one VTK `.vts` StructuredGrid per call via
+MPI-IO; **`"adios"`** writes one ADIOS2 `.bp` per stem (steps appended) carrying a VTK
+UnstructuredGrid schema so ParaView opens it directly (requires NekRS built with ADIOS).
+Box-mode samplers can also dump **line / planar / box averages** (`doAvg`). Points are
+distributed evenly across MPI ranks; the output is read back and validated in Python.
 
 ---
 
@@ -14,13 +17,16 @@ MPI ranks; the `.vts` files are read back and validated in Python.
 |------|---------|
 | `fieldExtract.hpp` | The sampler (header-only; copy into a NekRS case). |
 | `turbPipe_t1.udf` | **Clean minimal example** — a single box sampler. Start here. |
-| `turbPipe.udf` | **All-modes test driver** — samplers box 1d/2d/3d, cylinder, GLL box. |
+| `turbPipe.udf` | **All-modes test driver** — samplers box 1d/2d/3d, cylinder, GLL box; box3d also in ADIOS. |
+| `udf.cmake` | Case-local CMake hook that links ADIOS2 into `libudf` (needed for the `"adios"` backend). |
 | `turbPipe.{par,re2,usr}` | Rest of the runnable NekRS case. |
-| `fe_read.py` | Shared Python loader + analytic validators (`load`, `check`, `ref_vz`, `ref_T`, `trap_avg`, `check_avg`). |
+| `fe_read.py` | Shared Python loader + analytic validators (`load`, `load_bp`, `check`, `ref_vz`, `ref_T`, `trap_avg`, `check_avg`). |
 | `test_<cfg>.py` | Per-config validators: `test_box1d/box2d/box3d/cyl/box3dgll.py`. |
 | `test_avg.py` | Validates the `doAvg` outputs against numpy weighted averages of the source boxes. |
+| `test_bp.py` | Validates the ADIOS `.bp` outputs: analytic check, avg families, and a cross-format A/B (`.bp` vs `.vts`) to float32. |
 | `test_gll_quadrature.py` | Pure-python GLL quadrature tests (zwgll sanity, GLL vs trapezoid accuracy); runs without NekRS. |
 | `test_gll_viz.py` | Pcolor + mesh of the `box3d_gll_avgy_g*` x-z GLL plane — the grid clustering is visible by eye (`test_gll_viz.png`). |
+| `test_bp_viz.py` | Side-by-side mid-y x-z slice of `box3d.bp` vs the paired `.vts` (`test_bp_viz.png`). |
 | `test_viz.py` | Visualize the samplers in one figure. |
 | `test.py` | Original single-`.vts` reader / plotting example. |
 
@@ -35,9 +41,10 @@ MPI ranks; the `.vts` files are read back and validated in Python.
 1. Copy `fieldExtract.hpp` next to your case and `#include` it in the `.udf`.
 2. Construct one sampler per region in `UDF_Setup`.
 3. Call `process(time, tstep)` on your chosen cadence in `UDF_ExecuteStep`.
-4. **Release each global sampler on the last step** so the findpts MPI communicator is
-   freed *before* `MPI_Finalize` (otherwise MPICH warns about freeing a comm after
-   finalize):
+   Add a trailing `"adios"` to write ADIOS `.bp` instead of `.vts` (see below).
+4. **Release each global sampler on the last step** so the findpts MPI communicator (and
+   any open ADIOS engine) is freed *before* `MPI_Finalize` (otherwise MPICH warns about
+   freeing a comm after finalize):
 
 ```cpp
 if (nrs->lastStep) sampler.reset();
@@ -108,6 +115,33 @@ integer-id gslib/oogs gather-scatter (ids = reduced-cell index, the same pattern
 NekRS `planarAvg`); the handle is built once per direction, cached, and freed in the
 destructor.
 
+### IO backend (`format`: `"vts"` | `"adios"`)
+
+Both `process` and `doAvg` take a trailing `format` argument (default `"vts"`):
+
+```cpp
+sampler->process(time, tstep);                                  // -> <fname>...NNNNN.vts
+sampler->process(time, tstep, "adios");                         // -> <fname>....bp
+sampler->doAvg(time, tstep, "xy", "gather", "adios");           // -> <fname>_avgxy_g.bp
+```
+
+- `"vts"` — one VTK StructuredGrid file per call, one file per step (`...NNNNN.vts`).
+- `"adios"` — one ADIOS2 `.bp` per stem, **steps appended into the same file** (no
+  `NNNNN`), written as a VTK **UnstructuredGrid** (`.vtu`) so ParaView opens the `.bp`
+  directly. The box lattice becomes hex/quad/line cells (`vertices` + `connectivity` +
+  `types`); fields are ADIOS local arrays; the `.vts` FieldData tags (`boxDims`,
+  `pointDist`, `numPoints`, `x0`, `x1`) become ADIOS attributes, `time`/`CYCLE`
+  per-step variables, and a `vtk.xml` schema attribute drives ParaView.
+- **Requires** NekRS built with ADIOS (`NEKRS_ENABLE_ADIOS`) **and** a case-local
+  `udf.cmake` that links ADIOS2 into `libudf` and defines `NEKRS_ENABLE_ADIOS` for the
+  udf compile (the udf is dlopened, so it does not inherit the define from `nekrs-lib`).
+  A copy is provided in this folder — keep it next to your `.udf`. Requesting `"adios"`
+  without the define aborts with a clear message; an invalid `format` also aborts.
+- Multi-rank note: `.vtu` uses one local block per rank with local connectivity, so a
+  hex cell straddling the lexicographic rank boundary is not drawn (a thin seam between
+  slabs); **all point/field data is still written**. On a single rank the whole box is
+  emitted. Inspect with `bpls <fname>.bp -lav`.
+
 ### Minimal example (`turbPipe_t1.udf`)
 
 ```cpp
@@ -152,6 +186,10 @@ builds a cylindrical `r-θ-z` grid and feeds it through **points mode** using
 | box3d+gll | box    | `{11,7,21}` | box3d extents, **GLL points** (`{"gll"}`)  | `box3d_gll*.vts` |
 
 All regions stay inside the pipe (R=0.5) and within z∈[2,4] so every point is found.
+
+`box3d` is additionally emitted through the **ADIOS backend** (`format="adios"`) on the
+same cadence — `box3d.bp`, `box3d_avgxy_g.bp`, `box3d_avgz_gs.bp`, `box3d_avgxyz_g.bp` —
+so the two backends can be compared A/B (see `test_bp.py`).
 
 It also exercises `doAvg` on the same cadence, covering both modes and 1/2/3-axis
 averages:
@@ -199,6 +237,19 @@ of the source data (`fe_read.check_avg`, `tol = 1e-5` — same grid, same weight
 them) and an **analytic** cross-check against the weighted average of the reference
 fields (`tol = 1e-2`). Errors are normalized by the max of the *unaveraged* field,
 since some averages vanish by symmetry (e.g. the x-average of `temp ~ sin(pi x)`).
+
+ADIOS `.bp` tests (need the `adios2` python bindings; `load()` dispatches on the `.bp`
+extension and reads the latest step via `adios2.FileReader` into the same dict shape as
+the `.vts` loader, so all validators work unchanged):
+
+```bash
+python test_bp.py              # analytic check + avg families + A/B (.bp vs .vts, float32)
+python test_bp_viz.py [field]  # writes test_bp_viz.png (mid-y slice: .bp vs paired .vts)
+```
+
+`test_bp.py`'s A/B assertion is the key one: the `.bp` and same-step `.vts` fields (and
+coordinates) come from the same interpolation, so they must match to float32 — confirming
+the two backends are numerically identical, not just individually plausible.
 
 GLL-specific tests:
 
@@ -281,3 +332,22 @@ Wall time is reported through the NekRS timer under `fieldExtract::` — `setup`
 - Derived fields (e.g. `dT/dz`) in `fldList`.
 - Redistribution of explicit `XYZ` that don't match `boxDims` per rank.
 - In-memory `data()` accessor; eventual `.hpp` / `.cpp` split.
+
+## Development history
+
+The sampler was built in five reviewed steps; each has a design note in `plans/` and a
+running record (decisions, results, bugs) in `LOGBOOK_*.md`:
+
+| Step | Topic | Plan | Logbook |
+|------|-------|------|---------|
+| A | Cleanup: split constructors, header-only/ODR fixes, leak fix | `plans/A.md` | `LOGBOOK_A.md` |
+| B | Test coverage: box 1d/2d/3d, cylinder + per-config readers | `plans/B.md` | `LOGBOOK_B.md` |
+| C | `doAvg` averaging via custom integer-id oogs gather-scatter | `plans/C.md` | `LOGBOOK_C.md` |
+| D | Per-axis GLL point distribution + matching quadrature weights | `plans/D.md` | `LOGBOOK_D.md` |
+| E | Cleanup: retire geometry tags, prints, timers, `_gll` marker | `plans/E.md` | `LOGBOOK_E.md` |
+
+`CLAUDE.md` holds the working constraints and a condensed status; `progress071626.md`
+is a point-in-time meeting snapshot (predates Step E). Two NekRS-internals gotchas worth
+knowing are documented in `LOGBOOK_C.md`: the `ogsSetup` 256-entry local-row limit
+(worked around with per-cell pre-reduction) and the `oogs::destroy` `new[]`/`free()`
+mismatch (destructor frees with `ogsFree` + `delete[]`).

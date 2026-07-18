@@ -13,8 +13,58 @@ from vtk.util.numpy_support import vtk_to_numpy
 R = 0.5  # pipe radius
 
 
+def _parse_adios_value(meta):
+    """Parse an ADIOS attribute metadata dict {'Type','Value','Elements'} into a
+    python scalar or list. The adios2 2.10 python read_attribute() mis-reads array
+    attributes (broadcasts the first element), so we parse the reliable 'Value'
+    string instead, e.g. '{ 11, 7, 21 }' -> [11, 7, 21], '1617' -> 1617."""
+    val = meta["Value"].strip()
+    is_float = "double" in meta["Type"] or "float" in meta["Type"]
+    cast = float if is_float else int
+    if val.startswith("{"):
+        return [cast(x) for x in val.strip("{} ").split(",")]
+    return cast(val)
+
+
+def load_bp(fname):
+    """Load a fieldExtract ADIOS .bp (Plan F) into the same dict shape as the .vts
+    loader: dims, pointDist, time, X/Y/Z, and one entry per field. Uses the latest
+    step (matching the per-step .vts semantics). Coordinates come from the
+    'vertices' variable; box metadata from the attributes' Value strings."""
+    import adios2  # optional dep; only needed for .bp
+
+    with adios2.FileReader(fname) as f:
+        attrs = f.available_attributes()
+        variables = set(f.available_variables().keys())
+        ns = f.num_steps()
+        last = [ns - 1, 1]  # step_selection: start, count
+
+        nx, ny, nz = _parse_adios_value(attrs["boxDims"])
+        dist = tuple(_parse_adios_value(attrs["pointDist"])) if "pointDist" in attrs else (0, 0, 0)
+
+        verts = np.asarray(f.read("vertices", step_selection=last)).reshape(-1, 3)
+        out = {
+            "dims": (int(nx), int(ny), int(nz)),
+            "pointDist": dist,
+            "time": float(np.asarray(f.read("time", step_selection=last)).ravel()[0]),
+            "X": verts[:, 0].astype(np.float64),
+            "Y": verts[:, 1].astype(np.float64),
+            "Z": verts[:, 2].astype(np.float64),
+        }
+        # field variables = everything that is not mesh/metadata
+        reserved = {"vertices", "connectivity", "types", "time", "CYCLE"}
+        for name in sorted(variables - reserved):
+            arr = np.asarray(f.read(name, step_selection=last))
+            out[name] = arr.reshape(arr.shape[0], -1) if arr.ndim > 1 else arr.ravel()
+    return out
+
+
 def load(fname):
-    """Return dict with dims, time, X/Y/Z arrays, and one entry per PointData field."""
+    """Return dict with dims, time, X/Y/Z arrays, and one entry per PointData field.
+    Dispatches on extension: .bp -> ADIOS reader (Plan F), else VTK .vts reader."""
+    if fname.rstrip("/").endswith(".bp"):
+        return load_bp(fname)
+
     reader = vtk.vtkXMLStructuredGridReader()
     reader.SetFileName(fname)
     reader.Update()
