@@ -219,6 +219,16 @@ def trap_avg(F, dims, axes):
     return grid_avg(F, dims, axes, dist=(0, 0, 0))
 
 
+def azimuthal_avg(F, dims):
+    """Uniform-periodic average of a cyl tensor grid over the theta axis (axis 1
+    in the (nr,nt,nz) dims = the 'y' slot). For a periodic [0,2pi) grid the
+    quadrature weight is uniform 1/nt, i.e. a plain mean over theta -- matching
+    turbPipe_cyl.udf's setQuadrature. Returns shape (nz, 1, nr)."""
+    nr, nt, nz = dims
+    A = np.asarray(F, dtype=np.float64).reshape((nz, nt, nr))
+    return A.mean(axis=1, keepdims=True)
+
+
 def check_avg(avg_fname, src_fname, axes, mode, tol=1e-5):
     """Compare an _avg .vts against the numpy weighted average of its source box
     .vts (weights from the source file's pointDist: trapezoid or GLL).

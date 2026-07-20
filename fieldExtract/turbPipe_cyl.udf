@@ -1,0 +1,169 @@
+// --- fieldExtract cylinder demo (Plan G) ----------------------------------- //
+// Samples a full-circle r-theta-z tensor grid (points mode) and azimuthally
+// averages it THROUGH the plugin, using user-supplied quadrature weights
+// (setQuadrature). Run as its own case:  nrsmpi turbPipe_cyl <np>
+//
+//   process()                         -> cyldemo*.vts        (Cartesian point cloud)
+//   doAvg(.., "y")                    -> cyldemo_avgy_g*.vts  (theta-collapsed r-z profile)
+//   doAvg(.., "y", "gather-scatter")  -> cyldemo_avgy_gs*.vts (theta-avg broadcast: rings)
+//
+// avgDir "y" = axis 1 = theta. The theta axis is PERIODIC [0,2pi): dtheta = 2pi/nt
+// (endpoint excluded), so its quadrature weight is uniform 1/nt -- NOT the box-mode
+// trapezoid rule. The gather output is an (r,z) plane at y=0 with x = radius.
+#include "fieldExtract.hpp"
+
+std::unique_ptr<fieldExtract> feCyl;
+
+static dfloat zLength;
+
+// cylinder grid parameters (r>0, full circle, inside the pipe R=0.5)
+static constexpr int NR = 12, NT = 48, NZ = 11;
+static constexpr dfloat R0 = 0.05, R1 = 0.45, Z0 = 2.0, Z1 = 4.0;
+
+#ifdef __okl__
+
+void udfDirichlet(bcData *bc) // dummy BC
+{
+}
+
+#endif
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  platform->par->extract("casedata", "zlength", zLength);
+}
+
+// this rank's local slice of the (nr,nt,nz) cylinder grid in lexicographic
+// (nz,ntheta,nr) order. theta is periodic: dtheta = 2pi/nt (theta=2pi omitted).
+static std::array<std::vector<dfloat>, 3> cylinderPointsPeriodic(int nr, int nt, int nz)
+{
+  const dlong numPoints = (dlong)nr * nt * nz;
+  dlong nLocal, offset;
+  fieldExtract::pointDistribution(numPoints, nLocal, offset);
+
+  std::array<std::vector<dfloat>, 3> XYZ;
+  for (auto &v : XYZ) {
+    v.resize(nLocal);
+  }
+
+  const int nxy = nr * nt;
+  const dfloat dr = (nr > 1) ? (R1 - R0) / (nr - 1) : 0.0;
+  const dfloat dtheta = 2.0 * M_PI / nt; // periodic: endpoint excluded
+  const dfloat dz = (nz > 1) ? (Z1 - Z0) / (nz - 1) : 0.0;
+
+  for (dlong i = 0; i < nLocal; i++) {
+    const dlong ig = i + offset;
+    const int iz = ig / nxy;
+    const int rem = ig % nxy;
+    const int it = rem / nr;
+    const int ir = rem % nr;
+    const dfloat r = R0 + ir * dr;
+    const dfloat th = it * dtheta;
+    XYZ[0][i] = r * cos(th);
+    XYZ[1][i] = r * sin(th);
+    XYZ[2][i] = Z0 + iz * dz;
+  }
+  return XYZ;
+}
+
+// per-axis coordinates + normalized quadrature weights for the cylinder grid.
+// r,z: trapezoid on the inclusive grid; theta: uniform 1/nt (periodic).
+static void cylinderQuadrature(int nr,
+                               int nt,
+                               int nz,
+                               std::array<std::vector<dfloat>, 3> &coord,
+                               std::array<std::vector<dfloat>, 3> &weight)
+{
+  auto trapezoid = [](int n, dfloat a, dfloat b, std::vector<dfloat> &c, std::vector<dfloat> &w) {
+    c.resize(n);
+    w.resize(n);
+    const dfloat d = (n > 1) ? (b - a) / (n - 1) : 0.0;
+    for (int i = 0; i < n; i++) {
+      c[i] = a + i * d;
+      w[i] = (n > 1) ? ((i == 0 || i == n - 1) ? 0.5 : 1.0) / (n - 1) : 1.0;
+    }
+  };
+
+  trapezoid(nr, R0, R1, coord[0], weight[0]);
+  trapezoid(nz, Z0, Z1, coord[2], weight[2]);
+
+  // theta: periodic [0,2pi), uniform weight 1/nt (sums to 1)
+  coord[1].resize(nt);
+  weight[1].resize(nt);
+  const dfloat dtheta = 2.0 * M_PI / nt;
+  for (int i = 0; i < nt; i++) {
+    coord[1][i] = i * dtheta;
+    weight[1][i] = 1.0 / nt;
+  }
+}
+
+void UDF_Setup()
+{
+  // rescale mesh
+  {
+    auto mesh = nrs->meshT;
+    platform->linAlg->rescale(0.0, zLength, mesh->o_z, platform->comm.mpiComm());
+  }
+
+  auto mesh = nrs->meshT;
+
+  std::vector<fieldExtract::field> fldList;
+  deviceMemory<dfloat> o_w(nrs->fluid->o_U.slice(2 * nrs->fieldOffset, nrs->fieldOffset));
+  deviceMemory<dfloat> o_T(nrs->scalar->o_solution("temperature"));
+  fldList.push_back({"vz", std::vector{o_w}});
+  fldList.push_back({"temp", std::vector{o_T}});
+
+  // points-mode cylinder sampler + user-supplied quadrature (enables doAvg)
+  auto XYZ = cylinderPointsPeriodic(NR, NT, NZ);
+  // stem "cyldemo" (distinct from turbPipe.udf's "cyl" sampler so both cases can
+  // share this directory without clobbering each other's output)
+  feCyl = std::make_unique<fieldExtract>(mesh, std::vector<int>{NR, NT, NZ}, fldList, "cyldemo", XYZ);
+
+  std::array<std::vector<dfloat>, 3> coord, weight;
+  cylinderQuadrature(NR, NT, NZ, coord, weight);
+  feCyl->setQuadrature(coord, weight);
+}
+
+// analytic solution mirrored from turbPipe.udf::test_sol
+void test_sol(double time, int tstep)
+{
+  auto &fluid = nrs->fluid;
+  auto mesh = fluid->mesh;
+  auto [x, y, z] = mesh->xyzHost();
+  std::vector<dfloat> U(mesh->dim * nrs->fluid->fieldOffset, 0.0);
+  std::vector<dfloat> T(nrs->fluid->fieldOffset, 0.0);
+  for (int n = 0; n < mesh->Nlocal; n++) {
+    const auto R = 0.5;
+    const auto xr = x[n] / R;
+    const auto yr = y[n] / R;
+
+    auto rr = xr * xr + yr * yr;
+    rr = (rr > 0) ? sqrt(rr) : 0.0;
+
+    auto uz = 6 / 5. * (1 - pow(rr, 6));
+
+    U[n + 0 * nrs->fluid->fieldOffset] = 0.0;
+    U[n + 1 * nrs->fluid->fieldOffset] = 0.1;
+    U[n + 2 * nrs->fluid->fieldOffset] = uz * cos(time);
+
+    T[n] = sin(M_PI * x[n]) * cos(2.7 * M_PI * z[n] + 0.2);
+  }
+
+  nrs->fluid->o_U.copyFrom(U.data(), U.size());
+  nrs->scalar->o_solution("temperature").copyFrom(T.data(), mesh->Nlocal);
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  test_sol(time, tstep);
+
+  if (tstep % 2 == 0) {
+    feCyl->process(time, tstep);                      // -> cyldemo*.vts (Cartesian cloud)
+    feCyl->doAvg(time, tstep, "y");                   // -> cyldemo_avgy_g*.vts  (r-z profile)
+    feCyl->doAvg(time, tstep, "y", "gather-scatter"); // -> cyldemo_avgy_gs*.vts (rings)
+  }
+
+  if (nrs->lastStep) {
+    feCyl.reset(); // free the findpts MPI comm before MPI_Finalize
+  }
+}

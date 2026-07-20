@@ -100,6 +100,17 @@ public:
   // (points mode) can produce exactly this rank's local share of numPoints.
   static void pointDistribution(dlong numPoints, dlong &numLocal, dlong &offset);
 
+  // Points mode only: enable doAvg on a tensor-product grid by supplying the
+  // per-axis coordinates and normalized (sum=1 per axis) quadrature weights.
+  // Each coord[a]/weight[a] must have length boxDims[a] (singleton axes: length
+  // 1). The explicit points passed to the points-mode ctor must be the tensor
+  // product coord[0] x coord[1] x coord[2] in lexicographic (nz,ny,nx) order --
+  // this is the caller's responsibility (not verified). Weights are whatever
+  // rule fits the axis, e.g. uniform 1/n for a periodic [0,2pi) azimuth. See
+  // turbPipe_cyl.udf for a cylinder azimuthal-average example.
+  void setQuadrature(const std::array<std::vector<dfloat>, 3> &coord,
+                     const std::array<std::vector<dfloat>, 3> &weight);
+
 private:
   std::unique_ptr<pointInterpolation_t> interpolator;
 
@@ -131,7 +142,8 @@ private:
 
   std::vector<float> fldData;
 
-  bool boxMode = false; // true: box ctor (x0/x1 grid); false: points ctor
+  bool boxMode = false;  // true: box ctor (x0/x1 grid); false: points ctor
+  bool userAxes = false; // points mode: axisCoord/axisWeight set via setQuadrature
   bool setupCalled = false;
   bool setPointsCalled = false;
   bool avgAnnounced = false; // one-line notice on the first doAvg call
@@ -522,6 +534,30 @@ inline fieldExtract::fieldExtract(mesh_t *mesh,
   // point0/point1 stay {0,0,0}; they only feed the .vts x0/x1 tags.
   setPoints(XYZ);
   finishSetup(mesh);
+}
+
+inline void fieldExtract::setQuadrature(const std::array<std::vector<dfloat>, 3> &coord,
+                                        const std::array<std::vector<dfloat>, 3> &weight)
+{
+  nekrsCheck(boxMode,
+             MPI_COMM_SELF,
+             EXIT_FAILURE,
+             "%s\n",
+             "setQuadrature is for points mode; box mode already builds its own axes!");
+
+  for (int a = 0; a < 3; a++) {
+    const int n = (a < boxDim) ? boxDims[a] : 1;
+    nekrsCheck(static_cast<int>(coord[a].size()) != n || static_cast<int>(weight[a].size()) != n,
+               MPI_COMM_SELF,
+               EXIT_FAILURE,
+               "setQuadrature axis %d: coord/weight length must equal boxDims=%d\n",
+               a,
+               n);
+  }
+
+  axisCoord = coord;
+  axisWeight = weight;
+  userAxes = true;
 }
 
 inline fieldExtract::~fieldExtract()
@@ -1130,7 +1166,11 @@ inline void fieldExtract::doAvg(const double time,
                                 const std::string &format)
 {
   nekrsCheck(!setupCalled, MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "doAvg called prior to setup!");
-  nekrsCheck(!boxMode, MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "doAvg requires box mode (no custom points)!");
+  nekrsCheck(!boxMode && !userAxes,
+             MPI_COMM_SELF,
+             EXIT_FAILURE,
+             "%s\n",
+             "doAvg requires box mode, or points mode with setQuadrature()!");
   nekrsCheck(mode != "gather" && mode != "gather-scatter",
              MPI_COMM_SELF,
              EXIT_FAILURE,

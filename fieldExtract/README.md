@@ -18,15 +18,18 @@ distributed evenly across MPI ranks; the output is read back and validated in Py
 | `fieldExtract.hpp` | The sampler (header-only; copy into a NekRS case). |
 | `turbPipe_t1.udf` | **Clean minimal example** — a single box sampler. Start here. |
 | `turbPipe.udf` | **All-modes test driver** — samplers box 1d/2d/3d, cylinder, GLL box; box3d also in ADIOS. |
+| `turbPipe_cyl.udf` | **Cylinder demo** — full-circle r-θ-z grid + azimuthal average via `setQuadrature` (Plan G). Run as its own case `turbPipe_cyl`. |
 | `udf.cmake` | Case-local CMake hook that links ADIOS2 into `libudf` (needed for the `"adios"` backend). |
-| `turbPipe.{par,re2,usr}` | Rest of the runnable NekRS case. |
-| `fe_read.py` | Shared Python loader + analytic validators (`load`, `load_bp`, `check`, `ref_vz`, `ref_T`, `trap_avg`, `check_avg`). |
+| `turbPipe.{par,re2,usr}` | Rest of the runnable NekRS case (`turbPipe_cyl.{par,usr}` + a `.re2` symlink run the cylinder demo). |
+| `fe_read.py` | Shared Python loader + analytic validators (`load`, `load_bp`, `check`, `ref_vz`, `ref_T`, `trap_avg`, `check_avg`, `azimuthal_avg`). |
 | `test_<cfg>.py` | Per-config validators: `test_box1d/box2d/box3d/cyl/box3dgll.py`. |
 | `test_avg.py` | Validates the `doAvg` outputs against numpy weighted averages of the source boxes. |
+| `test_cyl_avg.py` | Validates the cylinder azimuthal average (exact θ-mean contract + analytic `<vz>_θ=vz`, `<temp>_θ=0`). |
 | `test_bp.py` | Validates the ADIOS `.bp` outputs: analytic check, avg families, and a cross-format A/B (`.bp` vs `.vts`) to float32. |
 | `test_gll_quadrature.py` | Pure-python GLL quadrature tests (zwgll sanity, GLL vs trapezoid accuracy); runs without NekRS. |
 | `test_gll_viz.py` | Pcolor + mesh of the `box3d_gll_avgy_g*` x-z GLL plane — the grid clustering is visible by eye (`test_gll_viz.png`). |
 | `test_bp_viz.py` | Side-by-side mid-y x-z slice of `box3d.bp` vs the paired `.vts` (`test_bp_viz.png`). |
+| `test_cyl_viz.py` | Raw r-θ point cloud + azimuthally-averaged (r,z) profile of the cylinder demo (`test_cyl_viz.png`). |
 | `test_viz.py` | Visualize the samplers in one figure. |
 | `test.py` | Original single-`.vts` reader / plotting example. |
 
@@ -84,9 +87,37 @@ static helper to compute that share:
 static void fieldExtract::pointDistribution(dlong numPoints, dlong &numLocal, dlong &offset);
 ```
 
-### Averaging (`doAvg`, box mode only)
+### User-supplied quadrature (`setQuadrature`, points mode)
 
-Average the current fields over any subset of axes whose dim > 1 and dump one `.vts`:
+`doAvg` also works on a **points-mode tensor grid** if you tell it the per-axis
+coordinates and quadrature weights:
+
+```cpp
+// each coord[a]/weight[a] has length boxDims[a]; weights normalized (sum=1) per axis.
+sampler->setQuadrature(coord, weight);   // call after construction, before doAvg
+```
+
+The explicit points passed to the points-mode ctor must be the tensor product
+`coord[0] × coord[1] × coord[2]` in lexicographic `(nz,ny,nx)` order (your
+responsibility — not verified). Weights are whatever rule fits each axis: e.g. a
+**periodic azimuth** `θ ∈ [0,2π)` uses `dθ = 2π/nt` (endpoint excluded) and **uniform
+weight `1/nt`** — *not* the trapezoid rule (which assumes an inclusive grid and would
+mis-weight the wrap-around point). See `turbPipe_cyl.udf` for a full cylinder example:
+it builds an `r-θ-z` grid, calls `setQuadrature`, then `doAvg("y")` (axis 1 = θ) to
+produce an azimuthally-averaged `(r,z)` profile (emitted as a plane at `y=0`, `x=radius`)
+and `doAvg("y","gather-scatter")` to broadcast the average back onto the cloud (rings).
+Validate with `python test_cyl_avg.py`; visualize with `python test_cyl_viz.py`:
+
+![cylinder demo — raw r-θ cloud + azimuthal (r,z) average](test_cyl_viz.png)
+
+Left: the raw `r-θ` point cloud at mid-z (axisymmetric `vz` peaks on the axis). Right:
+the through-plugin azimuthal average as an `(r,z)` profile. The `relerr` in each title is
+against the analytic reference (`<vz>_θ = vz(r)`).
+
+### Averaging (`doAvg`)
+
+Average the current fields over any subset of axes whose dim > 1 and dump one `.vts`
+(box mode, or points mode after `setQuadrature`):
 
 ```cpp
 sampler->doAvg(time, tstep, avgDir);                   // mode defaults to "gather"
@@ -335,7 +366,7 @@ Wall time is reported through the NekRS timer under `fieldExtract::` — `setup`
 
 ## Development history
 
-The sampler was built in five reviewed steps; each has a design note in `plans/` and a
+The sampler was built in seven reviewed steps; each has a design note in `plans/` and a
 running record (decisions, results, bugs) in `LOGBOOK_*.md`:
 
 | Step | Topic | Plan | Logbook |
@@ -345,9 +376,15 @@ running record (decisions, results, bugs) in `LOGBOOK_*.md`:
 | C | `doAvg` averaging via custom integer-id oogs gather-scatter | `plans/C.md` | `LOGBOOK_C.md` |
 | D | Per-axis GLL point distribution + matching quadrature weights | `plans/D.md` | `LOGBOOK_D.md` |
 | E | Cleanup: retire geometry tags, prints, timers, `_gll` marker | `plans/E.md` | `LOGBOOK_E.md` |
+| F | ADIOS2 `.bp` backend (per-call `format="adios"`, VTK `.vtu` schema) | `plans/F.md` | `LOGBOOK_F.md` |
+| G | Cylinder demo + azimuthal averaging via user-supplied quadrature (`setQuadrature`) | `plans/G.md` | `LOGBOOK_G.md` |
 
 `CLAUDE.md` holds the working constraints and a condensed status; `progress071626.md`
 is a point-in-time meeting snapshot (predates Step E). Two NekRS-internals gotchas worth
 knowing are documented in `LOGBOOK_C.md`: the `ogsSetup` 256-entry local-row limit
 (worked around with per-cell pre-reduction) and the `oogs::destroy` `new[]`/`free()`
-mismatch (destructor frees with `ogsFree` + `delete[]`).
+mismatch (destructor frees with `ogsFree` + `delete[]`). Step F adds two more, in
+`LOGBOOK_F.md`: the udf `.so` is dlopened so it does not inherit `NEKRS_ENABLE_ADIOS`
+or the adios link from `nekrs-lib` (the case-local `udf.cmake` supplies both), and the
+`adios2` 2.10 python `read_attribute` mis-reads array attributes (parse the metadata
+`Value` string instead).
