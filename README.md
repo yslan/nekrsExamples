@@ -34,6 +34,9 @@ Here we focus on porting Nek5000 functionality into NekRS
 - `hemi_elementFilter`
   detect CFL, only dump elelments aruond it using `elementFilter`
 
+- `lambda2`
+  Compute lambda2 to identify the surface of the vortices
+
 - `iofldFactory`
   A example of having extra iofldFactory.
   
