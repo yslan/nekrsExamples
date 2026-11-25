@@ -1,0 +1,148 @@
+// =========================================================================== //
+//  box3d.udf -- the isoSurface plugin against FIVE ANALYTIC CASES.
+//
+//  The companion to tgv/, and the complement of it.  tgv/ shows the production
+//  call, process(), on a field with no known answer.  This case does the
+//  opposite: every field here has a closed-form level set, so the extracted
+//  surface can be CHECKED, and it exercises the two debug verbs tgv/ never
+//  calls -- writeRoots() and writeSurface().
+//
+//      plane      degree 1.  Must be exact: any error is a bug, not a floor.
+//      sphere     curved.  The error IS the interpolation floor of the element.
+//      poly5      degree-deficient, so the top Legendre coefficient is tiny.
+//                 Exercises deflation (aFloor); a solver that divides by the
+//                 leading coefficient fails here.
+//      tangency   |grad f| -> 0 at the level.  The roots must be FLAGGED, not
+//                 silently wrong -- a double root is only sqrt(eps)-accurate.
+//      tgv        a real flow field, with an analytic velocity to interpolate.
+//
+//  numSteps = 0: everything runs at tstep 0, so no flow solve is needed.
+//
+//      nrsmpi box3d 1
+//
+//  Each case writes three files per cell order, one per verb -- see README.md.
+// =========================================================================== //
+#ifdef __okl__
+#include "isoSurface.okl"
+#endif
+
+#include "isoSurface.hpp"
+#include "isoTestCases.hpp"
+
+// One object per case per cell order.  Separate objects rather than one reused:
+// each owns its RootSet and its own output series, and keeping them alive is
+// what exercises the "roots are still valid, skip the solve" path.
+static std::vector<std::unique_ptr<isoSurface>> isoP1; // cellOrder 1
+static std::vector<std::unique_ptr<isoSurface>> isoP2; // cellOrder 2
+static std::vector<isoTest::TestCase> isoCases;
+
+// A sampler on a LIVE solver field, which is the intended production use.
+static std::unique_ptr<isoSurface> isoLive;
+
+#ifdef __okl__
+void udfDirichlet(bcData *bc)
+{
+  bc->sScalar = 0.0;
+}
+#endif
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options) {}
+
+void UDF_Setup()
+{
+  auto mesh = nrs->meshV;
+
+  // Named constructors: each builds its nodal field on this rank's mesh and
+  // carries a closed-form distance to the true level set.  Levels and centres
+  // are DERIVED from the mesh, so a case cannot be silently vacuous.
+  isoCases.push_back(isoTest::plane(mesh));
+  isoCases.push_back(isoTest::sphere(mesh));
+  isoCases.push_back(isoTest::poly5(mesh));
+  isoCases.push_back(isoTest::tangency(mesh));
+  isoCases.push_back(isoTest::tgv(mesh));
+
+  for (const auto &tc : isoCases) {
+    IsoSurfaceParams prm;
+    prm.levels = {tc.level};
+    prm.fileName = "iso" + tc.name;
+    prm.cellOrder = 1; // flat, VTK_TRIANGLE
+    isoP1.push_back(std::make_unique<isoSurface>(mesh, tc.f, prm));
+
+    IsoSurfaceParams p2 = prm;
+    p2.fileName = "iso" + tc.name + "P2";
+    p2.cellOrder = 2; // VTK_QUADRATIC_TRIANGLE + Newton-projected midside nodes
+    isoP2.push_back(std::make_unique<isoSurface>(mesh, tc.f, p2));
+
+    // an analytic auxiliary field, to check interpolation onto the surface
+    if (!tc.aux.empty()) {
+      isoP1.back()->setOutputFieldHost(tc.auxName, tc.auxComp, tc.aux);
+      isoP2.back()->setOutputFieldHost(tc.auxName, tc.auxComp, tc.aux);
+    }
+  }
+
+  // ---- the production shape, on a live field -------------------------------
+  {
+    IsoSurfaceParams prm;
+    prm.levels = {0.02, 0.05}; // several levels share ONE solve pass
+    prm.fileName = "isok";
+    prm.cellOrder = 2;
+    isoLive = std::make_unique<isoSurface>(mesh,
+                                           isoSurface::field{"k", {nrs->scalar->o_solution("k")}},
+                                           prm);
+    isoLive->setOutputFields(
+        {{"velocity",
+          {nrs->fluid->o_solution("x"), nrs->fluid->o_solution("y"), nrs->fluid->o_solution("z")}},
+         {"pressure", {nrs->fluid->o_solution("pressure")}}});
+  }
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  if (tstep != 0) {
+    return; // numSteps = 0; everything happens here
+  }
+  if (platform->comm.mpiRank() == 0) {
+    printf("\n=== isoSurface: five analytic cases ===\n");
+  }
+
+  for (size_t i = 0; i < isoP1.size(); ++i) {
+    const auto &tc = isoCases[i];
+
+    // SOLVE and WRITE are separate verbs deliberately.  solveRoots() is the
+    // expensive step and the only one that reads the field; writeRoots() is a
+    // debug product and writes only itself.
+    isoP1[i]->solveRoots();
+    isoP1[i]->writeRoots(time, tstep);
+    isoTest::check(tc, isoP1[i]->roots(0)); // error at the roots, vs analytic
+
+    // the field itself as a checkpoint, so it opens next to the surface
+    isoTest::writeCheckpoint(nrs, nrs->meshV, tc, time);
+
+    // buildTopology() is a third verb: it depends only on the roots, so a
+    // frozen field rebuilds nothing.  writeSurface() calls it if it has not run.
+    isoP1[i]->buildTopology();
+    isoP1[i]->writeSurface(time, tstep);
+    isoTest::checkSurface(tc, isoP1[i]->surface(0));
+
+    isoP2[i]->buildTopology();
+    isoP2[i]->writeSurface(time, tstep);
+    isoTest::checkSurface(tc, isoP2[i]->surface(0));
+
+    // process() is the deliverable: geometry, interpolation, the _fld_ file.
+    // The in-triangle error is what separates the two cell orders -- at the
+    // NODES both are exact by construction.
+    isoP1[i]->process(time, tstep);
+    isoP2[i]->process(time, tstep);
+    isoTest::checkFields(tc, isoP1[i]->surface(0), isoP1[i]->fields(0));
+    isoTest::checkFields(tc, isoP2[i]->surface(0), isoP2[i]->fields(0));
+  }
+
+  // the live field, the way a production case would call it
+  isoLive->process(time, tstep, true);
+
+  if (nrs->lastStep) { // free before nekrs::finalize(); the object owns MPI state
+    isoP1.clear();
+    isoP2.clear();
+    isoLive.reset();
+  }
+}

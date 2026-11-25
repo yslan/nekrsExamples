@@ -1,0 +1,44 @@
+================================================================================
+  Hard isosurface cases on ONE spectral element
+  three manufactured configurations on a deformed element, plus the
+  Taylor-Green vortex on a big undeformed one
+================================================================================
+
+  case      roots   tris  ambig  min|grad|   payload |       flat   PN recon  projected      floor  element
+  ----------------------------------------------------------------------------------------------------------------
+  tunnel      180    294     18   6.29e-01      7.0K |   4.31e-02   2.65e-02   3.79e-03   7.92e-08  N=8
+           figure -> ../figs/F_case_tunnel.png
+  gyroid      333    528     81   3.25e+00     12.7K |   1.67e-01   8.10e-02   1.18e-02   4.05e-04  N=8
+           figure -> ../figs/F_case_gyroid.png
+  tgv        1248   2240    184   1.72e+00     50.0K |   1.06e-01   4.00e-02   9.34e-03   2.22e-07  N=16, undef
+           figure -> ../figs/F_case_tgv.png
+  neck         14     24      0   1.96e-02      0.6K |   3.05e-02   1.45e-02   7.30e-03   2.91e-05  N=8
+           figure -> ../figs/F_case_neck.png
+
+  All four errors are max |f - c| against the ANALYTIC field, sampled
+  INSIDE every triangle -- not at the nodes, where the answer is trivially
+  exact.  The four columns separate the two error sources:
+    flat      flat marching-cubes triangles
+    PN recon  curved using ONLY the stored payload (positions + normals),
+              with no further access to the element.  THE CONSTRAINT CASE.
+    projected subdivide + Newton on the interpolant (needs element access):
+              the best the pipeline can do, kept as the reference
+    floor     distance from the INTERPOLANT's level set to the analytic one
+              -- the discretisation error, which no surface method can beat
+
+  Reading it: PN reconstruction roughly halves the flat error at ~5 floats
+  per vertex and zero element access.  Projection does 7-11x better but
+  needs the element data.  Both remain far above the interpolation floor on
+  'tunnel' (7.9e-08), so on that case the limit is the RECONSTRUCTION, not
+  the discretisation -- there is room for a richer payload.  On 'gyroid' the
+  floor is 4.1e-04 and the field is barely resolved at N=8, so refining the
+  surface matters less than raising N.
+
+    tunnel   MC case 13: the tunnel
+             alternating corner signs; face and interior ambiguity interact. Sign-based MC needs MC33's subcase tables; we evaluate the polynomial.
+    gyroid   gyroid: many sheets, high genus
+             a triply-periodic minimal surface: several disconnected sheets in one element and the largest number of ambiguous cells of any case here.
+    tgv      Taylor-Green vortex: Q-criterion
+             a REAL flow field, not a manufactured one: the Q-criterion of the standard Taylor-Green initial condition on one big undeformed element spanning the whole [0,2pi]^3 cell. Eight vortex tubes meet at the cell centre, so the isosurface has genuine flow topology; at N=16 one element resolves Q to 3.4e-07.
+    neck     neck: a topology change in progress
+             two lobes at the moment of merging; |grad f| ~ 2e-2 at the neck, so this is the sqrt(eps) tangency of section 2 and the case where gradient projection must be guarded.

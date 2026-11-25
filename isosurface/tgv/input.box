@@ -1,0 +1,27 @@
+base.rea
+-3                     spatial dimension  ( < 0 --> generate .rea/.re2 pair)
+1                      number of fields
+#=======================================================================
+#
+#  Taylor-Green vortex on [-pi,pi]^3, 8x8x8 elements, fully periodic.
+#
+#  8^3 = 512 elements.  At polynomialOrder = 7 that is 0.26M points, which
+#  runs interactively -- the reference case at examples/tgv uses 36^3 and
+#  23.9M points.  This example exists to show the isosurface plugin, not to
+#  resolve the flow; see README.md.
+#
+#  The domain is written directly on [-pi,pi] here.  The reference case uses
+#  [0,1] and rescales in tgv.usr::usrdat2; this example ships no .usr, so the
+#  box carries the real coordinates.
+#
+#  nelx < 0 means genbox spaces the grid itself, with the geometric ratio
+#  given as "gain" (1. = uniform).  The bc strings need exactly 3 characters.
+#
+#=======================================================================
+#
+Box
+-8  -8  -8                                           nelx,nely,nelz
+-3.14159265358979 3.14159265358979 1.                x0,x1,gain
+-3.14159265358979 3.14159265358979 1.                y0,y1,gain
+-3.14159265358979 3.14159265358979 1.                z0,z1,gain
+P  ,P  ,P  ,P  ,P  ,P                                bc's  (3 chars each!)

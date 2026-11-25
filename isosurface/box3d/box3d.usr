@@ -1,0 +1,17 @@
+c-----------------------------------------------------------------------
+      subroutine usrdat2()
+      include 'SIZE'
+      include 'TOTAL'
+
+      do e=1,nelt
+      do f=1,2*ndim
+        if (cbc(f,e,1) .eq. 'W  ') boundaryID(f,e) = 1
+        if (cbc(f,e,1) .eq. 'W  ') cbc(f,e,2) = 't  '
+        if (cbc(f,e,1) .eq. 'W  ') cbc(f,e,3) = 't  '
+        if (cbc(f,e,1) .eq. 'W  ') boundaryIDt(f,e) = 1
+      enddo
+      enddo
+
+      return
+      end
+c-----------------------------------------------------------------------

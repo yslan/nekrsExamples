@@ -1,0 +1,1514 @@
+// =========================================================================== //
+//  isoSurface.okl -- the device kernels.  SELF-CONTAINED PURE OKL: no C++, no
+//  includes, nothing the OCCA parser cannot read.  Include it from the .udf's
+//  __okl__ block:
+//
+//      #ifdef __okl__
+//      #include "isoSurface.okl"
+//      #endif
+//      #include "isoSurface.hpp"     // NOT guarded
+//
+//  REBUILD WARNING.  NekRS mtime-checks only <case>.okl and the .udf, so
+//  editing this file triggers NOTHING -- `touch <case>.udf` or run
+//  --build-only, or the run silently reuses the kernels it built last time.
+//
+//  A COPY.  The source is plugin/v6_device.okl, which is where the tests are.
+//  DEVELOPER.md describes the eight kernels.
+// =========================================================================== //
+
+// ===========================================================================
+//  INLINED from plugin/isoAberthReal.h -- edit THAT file, not this copy.
+//
+//  The Ehrlich-Aberth iteration with the complex arithmetic written on real
+//  pairs, because OKL has no std::complex.  The host compiles the same source
+//  text (through isoKernels.hpp), which is what keeps the two from drifting;
+//  see notes/20.
+// ===========================================================================
+
+#if !defined(ISO_AB_REAL)
+#define ISO_AB_REAL double
+#endif
+
+//  Value and derivative of sum_k a[k] P_k(z) at complex z = (zr, zi).
+//
+//  Same three-term recurrence as the complex overload in isoKernels.hpp, with
+//  every product written out:  (x+iy)(u+iv) = (xu-yv) + i(xv+yu).
+static inline void isoLegendreValDerC(const ISO_AB_REAL *a,
+                                      int n,
+                                      ISO_AB_REAL zr,
+                                      ISO_AB_REAL zi,
+                                      ISO_AB_REAL *valr,
+                                      ISO_AB_REAL *vali,
+                                      ISO_AB_REAL *derr,
+                                      ISO_AB_REAL *deri)
+{
+  if (n <= 0) {
+    *valr = a[0];
+    *vali = 0.0;
+    *derr = 0.0;
+    *deri = 0.0;
+    return;
+  }
+
+  // P0 = 1, P1 = z ; D0 = 0, D1 = 1
+  ISO_AB_REAL P0r = 1.0, P0i = 0.0;
+  ISO_AB_REAL P1r = zr, P1i = zi;
+  ISO_AB_REAL D0r = 0.0, D0i = 0.0;
+  ISO_AB_REAL D1r = 1.0, D1i = 0.0;
+
+  ISO_AB_REAL vr = a[0] + a[1] * P1r;
+  ISO_AB_REAL vi = a[1] * P1i;
+  ISO_AB_REAL dr = a[1] * D1r;
+  ISO_AB_REAL di = a[1] * D1i;
+
+  for (int k = 1; k < n; ++k) {
+    // NB the parentheses around each cast are REQUIRED, not style.  OCCA's
+    // expression parser cannot apply a binary operator whose right operand is a
+    // cast-to-parenthesised-expression: `a / (T)(x + 1)` is read as a division
+    // followed by a call and fails with "Unable to apply operator".  Wrapping
+    // the cast -- `a / ((T)(x + 1))` -- parses.  Verified against the real
+    // parser with `occa translate`.  See notes/22.
+    const ISO_AB_REAL kden = ((ISO_AB_REAL)(k + 1));
+    const ISO_AB_REAL c0 = ((ISO_AB_REAL)(2 * k + 1)) / kden;
+    const ISO_AB_REAL c1 = ((ISO_AB_REAL)k) / kden;
+
+    // P2 = c0 * z * P1 - c1 * P0
+    const ISO_AB_REAL zP1r = zr * P1r - zi * P1i;
+    const ISO_AB_REAL zP1i = zr * P1i + zi * P1r;
+    const ISO_AB_REAL P2r = c0 * zP1r - c1 * P0r;
+    const ISO_AB_REAL P2i = c0 * zP1i - c1 * P0i;
+
+    // D2 = c0 * (P1 + z * D1) - c1 * D0
+    const ISO_AB_REAL zD1r = zr * D1r - zi * D1i;
+    const ISO_AB_REAL zD1i = zr * D1i + zi * D1r;
+    const ISO_AB_REAL D2r = c0 * (P1r + zD1r) - c1 * D0r;
+    const ISO_AB_REAL D2i = c0 * (P1i + zD1i) - c1 * D0i;
+
+    vr += a[k + 1] * P2r;
+    vi += a[k + 1] * P2i;
+    dr += a[k + 1] * D2r;
+    di += a[k + 1] * D2i;
+
+    P0r = P1r;
+    P0i = P1i;
+    P1r = P2r;
+    P1i = P2i;
+    D0r = D1r;
+    D0i = D1i;
+    D1r = D2r;
+    D1i = D2i;
+  }
+
+  *valr = vr;
+  *vali = vi;
+  *derr = dr;
+  *deri = di;
+}
+
+//  Initial guess: Chebyshev points pushed off the real axis by delta.
+//
+//  delta != 0 is REQUIRED -- a purely real start cannot reach a complex root
+//  (measured: 1161 failures at delta = 0 over 4000 draws, 0 for delta in
+//  [0.01, 0.2]).  See notes/14; the value itself is mid-plateau, not tuned.
+static inline void isoAberthInitR(int n, ISO_AB_REAL delta, ISO_AB_REAL *zr, ISO_AB_REAL *zi)
+{
+  for (int i = 0; i < n; ++i) {
+    const ISO_AB_REAL th = 3.14159265358979323846 * (((ISO_AB_REAL)i) + 0.5) / ((ISO_AB_REAL)n);
+    zr[i] = cos(th);
+    zi[i] = delta * sin(th);
+  }
+}
+
+// --------------------------------------------------------------------------- //
+//  The iteration itself.  FIXED niter, no convergence test, no early exit:
+//  identical work per fibre, so a GPU warp never diverges (notes/10, notes/14).
+//
+//      w      = p(z_i) / p'(z_i)
+//      S      = sum_{j != i} 1 / (z_i - z_j)      the repulsion term
+//      z_i   -= w / (1 - w S)
+//
+//  Returns the largest final correction through *finalCorr (may be null): the
+//  safety net that says whether niter was enough.
+// --------------------------------------------------------------------------- //
+static inline void isoAberthIterateR(const ISO_AB_REAL *a,
+                                     int n,
+                                     int niter,
+                                     ISO_AB_REAL *zr,
+                                     ISO_AB_REAL *zi,
+                                     ISO_AB_REAL *finalCorr)
+{
+  ISO_AB_REAL corrMax = 0.0;
+  for (int it = 0; it < niter; ++it) {
+    corrMax = 0.0;
+    for (int i = 0; i < n; ++i) {
+      ISO_AB_REAL vr, vi, dr, di;
+      isoLegendreValDerC(a, n, zr[i], zi[i], &vr, &vi, &dr, &di);
+
+      // w = v / d   (complex divide, guarded exactly as the complex version:
+      // |d| > 0, i.e. the denominator is not an exact zero)
+      const ISO_AB_REAL d2 = dr * dr + di * di;
+      ISO_AB_REAL wr = 0.0, wi = 0.0;
+      if (d2 > 0.0) {
+        wr = (vr * dr + vi * di) / d2;
+        wi = (vi * dr - vr * di) / d2;
+      }
+
+      // S = sum_{j != i} 1 / (z_i - z_j)
+      ISO_AB_REAL Sr = 0.0, Si = 0.0;
+      for (int j = 0; j < n; ++j) {
+        if (j == i) {
+          continue;
+        }
+        const ISO_AB_REAL xr = zr[i] - zr[j];
+        const ISO_AB_REAL xi = zi[i] - zi[j];
+        const ISO_AB_REAL x2 = xr * xr + xi * xi;
+        if (x2 > 0.0) {
+          Sr += xr / x2;
+          Si += -xi / x2;
+        }
+      }
+
+      // den = 1 - w S
+      const ISO_AB_REAL wSr = wr * Sr - wi * Si;
+      const ISO_AB_REAL wSi = wr * Si + wi * Sr;
+      const ISO_AB_REAL denr = 1.0 - wSr;
+      const ISO_AB_REAL deni = -wSi;
+
+      // corr = w / den, falling back to w when den underflows
+      const ISO_AB_REAL den2 = denr * denr + deni * deni;
+      ISO_AB_REAL cr, ci;
+      if (den2 > 1e-300) {
+        cr = (wr * denr + wi * deni) / den2;
+        ci = (wi * denr - wr * deni) / den2;
+      } else {
+        cr = wr;
+        ci = wi;
+      }
+      // a non-finite correction means the iteration has left the rails; freeze
+      // this root rather than poison the whole fibre with a NaN
+      if (!(cr == cr) || !(ci == ci) || (cr - cr) != 0.0 || (ci - ci) != 0.0) {
+        cr = 0.0;
+        ci = 0.0;
+      }
+
+      zr[i] -= cr;
+      zi[i] -= ci;
+
+      const ISO_AB_REAL ac = sqrt(cr * cr + ci * ci);
+      corrMax = (ac > corrMax) ? ac : corrMax;
+    }
+  }
+  if (finalCorr) {
+    *finalCorr = corrMax;
+  }
+}
+
+// ===========================================================================
+//  end of the inlined isoAberthReal.h
+// ===========================================================================
+
+// NOTE on formatting: clang-format rewrites `@restrict` as `@ restrict`.  That
+// is fine -- both spellings appear in NekRS's own .okl files (e.g.
+// src/core/kernels/nStagesSum3.okl:33) and in pink_v20.hpp, and OCCA accepts
+// either.  So this file stays clang-format-idempotent like the rest.
+
+//  Device-side helpers.  `static inline`, C-style: OKL has no namespaces and no
+//  references.  These mirror isoKernels.hpp one for one; where a name differs
+//  only by the `Dev` suffix, the bodies are line-for-line the same.
+
+// K_N, the exact worst-case GLL overshoot as a fraction of the nodal range.
+// Indexed by polynomial order.  A degree-N interpolant really does leave the
+// range of its own nodal values -- measured in 151 of 300 random elements -- so
+// culling on the plain nodal min/max is NOT rigorous (notes/15).
+#define p_isoMaxNq 21
+
+static inline dfloat isoKGLLDev(int N)
+{
+  const dfloat t[p_isoMaxNq] = {0.000000, 0.000000, 0.125000, 0.250000, 0.317941, 0.389297, 0.436872,
+                                0.486184, 0.522820, 0.560482, 0.590271, 0.620736, 0.645834, 0.671410,
+                                0.693094, 0.715132, 0.734219, 0.753579, 0.770624, 0.787886, 0.803284};
+  return (N >= 0 && N < p_isoMaxNq) ? t[N] : 0.803284;
+}
+
+// Barycentric weights L_j(t), summing to 1.  Exact-node case is one-hot.
+static inline void isoBaryWeightsDev(const dfloat *xn, const dfloat *bw, int Nq, dfloat t, dfloat *L)
+{
+  for (int j = 0; j < Nq; ++j) {
+    if (fabs(t - xn[j]) < 1e-14) {
+      for (int i = 0; i < Nq; ++i) {
+        L[i] = 0.0;
+      }
+      L[j] = 1.0;
+      return;
+    }
+  }
+  dfloat den = 0.0;
+  for (int j = 0; j < Nq; ++j) {
+    L[j] = bw[j] / (t - xn[j]);
+    den += L[j];
+  }
+  for (int j = 0; j < Nq; ++j) {
+    L[j] /= den;
+  }
+}
+
+// Exact derivative of the barycentric basis, L_j'(t).
+// NOT a finite difference: the geometry Jacobian may use one (it only rotates a
+// gradient), but the Newton projection would be capped at sqrt(eps) by it.
+static inline void isoBaryDerivDev(const dfloat *xn, const dfloat *bw, int Nq, dfloat t, dfloat *dL)
+{
+  for (int m = 0; m < Nq; ++m) {
+    if (fabs(t - xn[m]) < 1e-14) { // on node m: the 0/0 case, use the node formula
+      dfloat acc = 0.0;
+      for (int j = 0; j < Nq; ++j) {
+        if (j == m) {
+          continue;
+        }
+        dL[j] = (bw[j] / bw[m]) / (xn[m] - xn[j]);
+        acc += dL[j];
+      }
+      dL[m] = -acc;
+      return;
+    }
+  }
+  // Sized by p_Nq, the actual loop bound.  It used to be p_isoMaxNq, the size of
+  // the K_N lookup table -- a DIFFERENT quantity that merely happened to be
+  // larger, and would have been a stack overrun at polynomialOrder >= 21
+  // (notes/25: size an array by the thing that indexes it).
+  dfloat u[p_Nq];
+  dfloat S = 0.0, Sp = 0.0;
+  for (int j = 0; j < Nq; ++j) {
+    u[j] = bw[j] / (t - xn[j]);
+    S += u[j];
+    Sp += -u[j] / (t - xn[j]);
+  }
+  for (int j = 0; j < Nq; ++j) {
+    const dfloat up = -u[j] / (t - xn[j]);
+    dL[j] = up / S - (u[j] / S) * (Sp / S);
+  }
+}
+
+// Nodal -> modal (discrete Legendre projection) of one fibre.
+// gamma_N = 2/N, not 2/(2N+1): GLL quadrature is exact only to degree 2N-1 and
+// P_N^2 has degree 2N.  Getting it wrong corrupts a_N, the coefficient that
+// deflation inspects.  M is precomputed on the host and uploaded.
+static inline void isoNodalToModalDev(const dfloat *M, const dfloat *f, int Nq, dfloat *a)
+{
+  for (int k = 0; k < Nq; ++k) {
+    dfloat s = 0.0;
+    for (int j = 0; j < Nq; ++j) {
+      s += M[k * Nq + j] * f[j];
+    }
+    a[k] = s;
+  }
+}
+
+// Degree deflation: drop trailing coefficients below aFloor.  This is what makes
+// route A/C exact on a well-resolved element, where a_N is legitimately tiny
+// (0 mismatches / 20,000 draws, notes/08).
+static inline int isoDeflateDegreeDev(const dfloat *a, int N, dfloat aFloor)
+{
+  dfloat amax = 0.0;
+  for (int k = 0; k <= N; ++k) {
+    const dfloat v = fabs(a[k]);
+    amax = (v > amax) ? v : amax;
+  }
+  if (amax <= 0.0) {
+    return 0;
+  }
+  int n = N;
+  while (n > 0 && fabs(a[n]) <= aFloor * amax) {
+    --n;
+  }
+  return n;
+}
+
+// --------------------------------------------------------------------------- //
+//  isoCullOKL -- can this element cross this level at all?
+//
+//  One pass over the element's nodes for min/max, then the RIGOROUS band:
+//      [min - theta*K_N*range, max + theta*K_N*range]
+//  theta = 1 cannot miss a crossing; theta = 0 is the naive nodal test and is
+//  NOT rigorous.  See notes/15 -- this is the one magic number in the method.
+//
+//  Writes 1/0 per (element, level).  Cheap, and it removed 60.6% of the work on
+//  the real periodicHill mesh.
+// --------------------------------------------------------------------------- //
+@kernel void isoCullOKL(const dlong Nelements,
+                        const int nLev,
+                        const int N,
+                        const dfloat cullTheta,
+                        @ restrict const dfloat *levels,
+                        @ restrict const dfloat *FLD,
+                        @ restrict int *elemCross)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    @shared dfloat s_min[p_Nq * p_Nq];
+    @shared dfloat s_max[p_Nq * p_Nq];
+
+    for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+      for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+        dfloat lo = FLD[e * p_Np + j * p_Nq + i];
+        dfloat hi = lo;
+        for (int k = 0; k < p_Nq; ++k) {
+          const dfloat v = FLD[e * p_Np + (k * p_Nq + j) * p_Nq + i];
+          lo = (v < lo) ? v : lo;
+          hi = (v > hi) ? v : hi;
+        }
+        s_min[j * p_Nq + i] = lo;
+        s_max[j * p_Nq + i] = hi;
+      }
+    }
+    @barrier();
+
+    for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+      for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+        if (j == 0 && i == 0) {
+          dfloat lo = s_min[0], hi = s_max[0];
+          for (int q = 1; q < p_Nq * p_Nq; ++q) {
+            lo = (s_min[q] < lo) ? s_min[q] : lo;
+            hi = (s_max[q] > hi) ? s_max[q] : hi;
+          }
+          const dfloat pad = cullTheta * isoKGLLDev(N) * (hi - lo);
+          for (int l = 0; l < nLev; ++l) {
+            const dfloat c = levels[l];
+            elemCross[e * nLev + l] = (c >= lo - pad && c <= hi + pad) ? 1 : 0;
+          }
+        }
+      }
+    }
+  }
+}
+
+// --------------------------------------------------------------------------- //
+//  isoSolveFibresOKL -- THE HOT KERNEL.  One fibre per thread.
+//
+//  @inner(0) spans all 3(N+1)^2 fibres rather than (N+1)^2 with the three
+//  directions unrolled: REGISTER PRESSURE decides it.  The Aberth state is 6*Nq
+//  doubles, and unrolling three directions risks 216-288 registers against an
+//  architectural 255.  Coalescing favours the other shape but does not pay --
+//  each fibre is read once and then iterated on registers.  DEVELOPER.md.
+//
+//  Fixed niter, no early exit: identical work per thread, so the warp never
+//  diverges.  Output order is deterministic -- see the two-pass note below.
+// --------------------------------------------------------------------------- //
+@kernel void isoSolveFibresOKL(const dlong Nelements,
+                               const int lev,
+                               const int nLev,
+                               const int N,
+                               const dfloat level,
+                               const dlong capRoot,
+                               const int niter,
+                               const dfloat delta,
+                               const dfloat aFloor,
+                               const dfloat imagTol,
+                               const dfloat margin,
+                               const dfloat gradRelTol,
+                               @ restrict const int *elemCross,
+                               @ restrict const dfloat *xn,
+                               @ restrict const dfloat *bw,
+                               @ restrict const dfloat *Mmat,
+                               @ restrict const dfloat *FLD,
+                               @ restrict int *rootCount,
+                               @ restrict dfloat *rootR,
+                               @ restrict dfloat *rootS,
+                               @ restrict dfloat *rootT,
+                               @ restrict dfloat *rootSlope,
+                               @ restrict int *rootDir,
+                               @ restrict int *rootJK,
+                               @ restrict unsigned char *rootFlag,
+                               @ restrict int *overflow)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    @shared dfloat s_fld[p_Np];
+    @shared int s_skip[1];                // @shared must be an ARRAY in OKL, even for a scalar
+    @shared int s_nRoot[3 * p_Nq * p_Nq]; // per-fibre count, then its offset
+
+    for (int t = 0; t < 3 * p_Nq * p_Nq; ++t; @inner(0)) {
+      if (t == 0) {
+        s_skip[0] = (elemCross[e * nLev + lev] == 0) ? 1 : 0;
+        rootCount[e] = 0;
+      }
+      for (int q = t; q < p_Np; q += 3 * p_Nq * p_Nq) {
+        s_fld[q] = FLD[e * p_Np + q];
+      }
+    }
+    @barrier();
+
+    // TWO PASSES, because OKL has no atomic CAPTURE -- @atomic is a statement
+    // qualifier, not a value-returning expression, so `slot = atomicAdd(c,1)`
+    // has no spelling (notes/22).  Count into @shared, prefix-sum, then write at
+    // an exclusive offset.  This also makes the output order DETERMINISTIC, at
+    // the cost of solving each fibre twice.
+    for (int t = 0; t < 3 * p_Nq * p_Nq; ++t; @inner(0)) {
+      s_nRoot[t] = 0;
+      if (!s_skip[0]) {
+        const int dir = t / (p_Nq * p_Nq);
+        const int rem = t - dir * p_Nq * p_Nq;
+        const int jj = rem / p_Nq;
+        const int kk = rem - jj * p_Nq;
+
+        // gather the fibre.  dir = 0: i varies (stride 1); 1: j (stride Nq);
+        // 2: k (stride Nq*Nq).  Indexing is u[(k*Nq + j)*Nq + i].
+        dfloat fib[p_Nq];
+        for (int i = 0; i < p_Nq; ++i) {
+          int id;
+          if (dir == 0) {
+            id = (kk * p_Nq + jj) * p_Nq + i;
+          } else if (dir == 1) {
+            id = (kk * p_Nq + i) * p_Nq + jj;
+          } else {
+            id = (i * p_Nq + kk) * p_Nq + jj;
+          }
+          fib[i] = s_fld[id] - level;
+        }
+
+        dfloat a[p_Nq];
+        isoNodalToModalDev(Mmat, fib, p_Nq, a);
+        const int n = isoDeflateDegreeDev(a, N, aFloor);
+
+        if (n >= 1) {
+          dfloat zr[p_Nq], zi[p_Nq];
+          isoAberthInitR(n, delta, zr, zi);
+          isoAberthIterateR(a, n, niter, zr, zi, (dfloat *)0);
+
+          // the fibre's amplitude sets the RELATIVE tangency threshold: an
+          // absolute floor cannot work, because a computed double root sits
+          // ~sqrt(eps) away and |p'| lands at ~1e-8, not 0 (notes/13).
+          dfloat fAmp = 0.0;
+          for (int i = 0; i < p_Nq; ++i) {
+            const dfloat v = fabs(fib[i]);
+            fAmp = (v > fAmp) ? v : fAmp;
+          }
+
+          int cnt = 0;
+          for (int i = 0; i < n; ++i) {
+            if (fabs(zi[i]) >= imagTol) {
+              continue;
+            }
+            const dfloat r = zr[i];
+            if (r < -1.0 - margin || r > 1.0 + margin) {
+              continue;
+            }
+            ++cnt;
+          }
+          s_nRoot[t] = cnt;
+        }
+      }
+    }
+    @barrier();
+
+    // exclusive prefix sum over the fibres: s_nRoot[t] becomes fibre t's offset
+    for (int t = 0; t < 3 * p_Nq * p_Nq; ++t; @inner(0)) {
+      if (t == 0) {
+        int acc = 0;
+        for (int q = 0; q < 3 * p_Nq * p_Nq; ++q) {
+          const int v = s_nRoot[q];
+          s_nRoot[q] = acc;
+          acc += v;
+        }
+        rootCount[e] = (acc < capRoot) ? acc : capRoot;
+        if (acc > capRoot) {
+          // Count the ROOTS LOST, not the elements affected -- the two sites
+          // feeding overflow[] must mean the same thing or the message lies
+          // about the magnitude (notes/25).
+          @atomic overflow[0] += (acc - capRoot);
+        }
+      }
+    }
+    @barrier();
+
+    for (int t = 0; t < 3 * p_Nq * p_Nq; ++t; @inner(0)) {
+      if (!s_skip[0]) {
+        const int dir = t / (p_Nq * p_Nq);
+        const int rem = t - dir * p_Nq * p_Nq;
+        const int jj = rem / p_Nq;
+        const int kk = rem - jj * p_Nq;
+
+        dfloat fib[p_Nq];
+        for (int i = 0; i < p_Nq; ++i) {
+          int id;
+          if (dir == 0) {
+            id = (kk * p_Nq + jj) * p_Nq + i;
+          } else if (dir == 1) {
+            id = (kk * p_Nq + i) * p_Nq + jj;
+          } else {
+            id = (i * p_Nq + kk) * p_Nq + jj;
+          }
+          fib[i] = s_fld[id] - level;
+        }
+        dfloat a[p_Nq];
+        isoNodalToModalDev(Mmat, fib, p_Nq, a);
+        const int n = isoDeflateDegreeDev(a, N, aFloor);
+        if (n >= 1) {
+          dfloat zr[p_Nq], zi[p_Nq];
+          isoAberthInitR(n, delta, zr, zi);
+          isoAberthIterateR(a, n, niter, zr, zi, (dfloat *)0);
+
+          dfloat fAmp = 0.0;
+          for (int i = 0; i < p_Nq; ++i) {
+            const dfloat v = fabs(fib[i]);
+            fAmp = (v > fAmp) ? v : fAmp;
+          }
+
+          int slot = s_nRoot[t];
+          for (int i = 0; i < n; ++i) {
+            if (fabs(zi[i]) >= imagTol) {
+              continue;
+            }
+            const dfloat r = zr[i];
+            if (r < -1.0 - margin || r > 1.0 + margin) {
+              continue;
+            }
+            dfloat vr, vi, dr, di;
+            isoLegendreValDerC(a, n, r, 0.0, &vr, &vi, &dr, &di);
+
+            if (slot >= capRoot) {
+              continue; // already flagged above
+            }
+            const dlong o = e * capRoot + slot;
+            // reference coordinates: the fibre's two fixed node positions plus
+            // the root along its own direction
+            if (dir == 0) {
+              rootR[o] = r;
+              rootS[o] = xn[jj];
+              rootT[o] = xn[kk];
+            } else if (dir == 1) {
+              rootR[o] = xn[jj];
+              rootS[o] = r;
+              rootT[o] = xn[kk];
+            } else {
+              rootR[o] = xn[jj];
+              rootS[o] = xn[kk];
+              rootT[o] = r;
+            }
+            rootSlope[o] = dr;
+            rootDir[o] = dir;
+            rootJK[o] = jj * p_Nq + kk;
+
+            unsigned char fl = 0;
+            if (fabs(dr) < gradRelTol * fAmp) {
+              fl |= 1; // Tangency
+            }
+            if (fabs(fabs(r) - 1.0) <= margin) {
+              fl |= 4; // OnFace
+            }
+            rootFlag[o] = fl;
+            ++slot;
+          }
+        }
+      }
+    }
+  }
+}
+
+//  Marching-cubes topology tables, GENERATED on the device.
+//
+//  Corner c has (i,j,k) = (c&1, (c>>1)&1, (c>>2)&1).  The 12 edges are the corner
+//  pairs differing in exactly one bit, in the same sorted order as the host
+//  (isoKernels.hpp::cubeEdges), so the two agree edge for edge.
+//
+//  Only the EDGE table is needed: cut points are connected by the ring walk, so
+//  neither the 256x16 triangle table nor MC33's subcases are (notes/16).
+static inline void isoCubeEdgeDev(int e, int *a, int *b, int *dir)
+{
+  int n = 0;
+  for (int ca = 0; ca < 8; ++ca) {
+    for (int d = 0; d < 3; ++d) {
+      const int cb = ca | (1 << d);
+      if (cb != ca) {
+        if (n == e) {
+          *a = ca;
+          *b = cb;
+          *dir = d;
+          return;
+        }
+        ++n;
+      }
+    }
+  }
+  *a = 0;
+  *b = 1;
+  *dir = 0;
+}
+
+// bit e set when edge e has endpoints of opposite sign; bit c of idx set when
+// corner c has f < 0.
+static inline int isoMcEdgeMaskDev(int idx)
+{
+  int m = 0;
+  for (int e = 0; e < 12; ++e) {
+    int a, b, d;
+    isoCubeEdgeDev(e, &a, &b, &d);
+    if (((idx >> a) & 1) != ((idx >> b) & 1)) {
+      m |= (1 << e);
+    }
+  }
+  return m;
+}
+
+// --------------------------------------------------------------------------- //
+//  Face topology of a sub-cell, for the RING WALK (plan H).
+//
+//  A face is shared by exactly two cells and both see that face's own four
+//  edges, so "the cut points of this face" is computed from data both sides
+//  share and they cannot disagree.  That symmetry is the whole reason the walk
+//  cannot crack the surface; a per-CELL predicate does not have it (a cell can
+//  have a split edge that is not on the shared face).
+//
+//  DERIVED, not tabulated: the corner lists are the only input and the edge
+//  lists come from isoCubeEdgeDev, so they cannot drift from the numbering the
+//  marching table was built against.  Corners are CYCLIC, so walking them
+//  traverses the boundary once.
+// --------------------------------------------------------------------------- //
+static inline void isoFaceCornersDev(int f, int *c)
+{
+  // {axis, side}: the 4 corners with bit `axis` equal to `side`, ordered so the
+  // walk goes round the face rather than across it.
+  const int T[6][4] = {{0, 2, 6, 4}, {1, 5, 7, 3}, {0, 4, 5, 1}, {2, 3, 7, 6}, {0, 1, 3, 2}, {4, 6, 7, 5}};
+  for (int m = 0; m < 4; ++m) {
+    c[m] = T[f][m];
+  }
+}
+
+// Edge index of the face-boundary segment from corner m to m+1, and whether the
+// edge runs the SAME way as the walk (its low corner is the one we leave).
+static inline void isoFaceEdgeDev(int f, int m, int *edge, int *fwd)
+{
+  int c[4];
+  isoFaceCornersDev(f, c);
+  const int a = c[m], b = c[(m + 1) & 3];
+  for (int e = 0; e < 12; ++e) {
+    int ea, eb, d;
+    isoCubeEdgeDev(e, &ea, &eb, &d);
+    if ((ea == a && eb == b) || (ea == b && eb == a)) {
+      *edge = e;
+      *fwd = (ea == a);
+      return;
+    }
+  }
+  *edge = -1;
+  *fwd = 1;
+}
+
+// The two faces that share edge e.
+static inline void isoEdgeFacesDev(int e, int *f0, int *f1)
+{
+  int n = 0;
+  *f0 = -1;
+  *f1 = -1;
+  for (int f = 0; f < 6; ++f) {
+    for (int m = 0; m < 4; ++m) {
+      int ee, fw;
+      isoFaceEdgeDev(f, m, &ee, &fw);
+      if (ee == e) {
+        if (n == 0) {
+          *f0 = f;
+        } else {
+          *f1 = f;
+        }
+        ++n;
+        break;
+      }
+    }
+  }
+}
+
+// --------------------------------------------------------------------------- //
+//  FACE AMBIGUITY (plan I).  A face whose four corners alternate in sign has
+//  four crossings, and they pair up two ways: the two negative corners are
+//  either joined THROUGH the face or separated by it.  Both are consistent with
+//  the signs and they differ in the number of connected components, so a wrong
+//  choice merges two lobes or punches a tunnel.
+//
+//  Decided by EVALUATING the interpolant at the face centre, inline in
+//  isoTopologyOKL.  Nielson-Hamann's bilinear saddle is the textbook answer and
+//  is NOT used: measured against the real field it is right on 44 of 56 faces
+//  where the centre is right on 55 (reports/I).  The saddle is located from four
+//  corner values and can sit far from where a degree-N level set pinches.
+// --------------------------------------------------------------------------- //
+
+// Value of a tensor-product nodal field at one point -- no gradient.
+static inline dfloat
+isoTensorEvalDev(const dfloat *u, int Nq, const dfloat *Lr, const dfloat *Ls, const dfloat *Lt)
+{
+  dfloat f = 0.0;
+  for (int c = 0; c < Nq; ++c) {
+    for (int b = 0; b < Nq; ++b) {
+      dfloat inner = 0.0;
+      for (int a = 0; a < Nq; ++a) {
+        inner += Lr[a] * u[(c * Nq + b) * Nq + a];
+      }
+      f += Ls[b] * Lt[c] * inner;
+    }
+  }
+  return f;
+}
+
+// Value AND reference gradient in one pass; g may be null.
+static inline dfloat isoTensorEvalGradDev(const dfloat *u,
+                                          int Nq,
+                                          const dfloat *Lr,
+                                          const dfloat *Ls,
+                                          const dfloat *Lt,
+                                          const dfloat *Dr,
+                                          const dfloat *Ds,
+                                          const dfloat *Dt,
+                                          dfloat *g)
+{
+  dfloat f = 0.0, g0 = 0.0, g1 = 0.0, g2 = 0.0;
+  for (int c = 0; c < Nq; ++c) {
+    for (int b = 0; b < Nq; ++b) {
+      const int row = (c * Nq + b) * Nq;
+      const dfloat LsLt = Ls[b] * Lt[c];
+      const dfloat DsLt = Ds[b] * Lt[c];
+      const dfloat LsDt = Ls[b] * Dt[c];
+      for (int a = 0; a < Nq; ++a) {
+        const dfloat v = u[row + a];
+        f += Lr[a] * LsLt * v;
+        g0 += Dr[a] * LsLt * v;
+        g1 += Lr[a] * DsLt * v;
+        g2 += Lr[a] * LsDt * v;
+      }
+    }
+  }
+  if (g) {
+    g[0] = g0;
+    g[1] = g1;
+    g[2] = g2;
+  }
+  return f;
+}
+
+// --------------------------------------------------------------------------- //
+//  isoTopologyOKL -- marching cubes on the GLL lattice, one element per block.
+//
+//  The marching lattice IS the GLL grid, so the crossings on its edges are
+//  already known EXACTLY from the fibre solve -- no interpolation along an edge,
+//  which is what an ordinary marching cubes must do.
+//
+//  THE LATTICE IS FIXED, unlike v1, which inserts a plane for a fibre carrying
+//  two roots in one interval (a sign test cannot see such a pair: both endpoints
+//  share a sign).  Both crossings are kept anyway and the RING WALK connects
+//  them; nUnseparated counts such edges.
+//
+//  Ambiguity is resolved by EVALUATING the interpolant at the cut-point
+//  centroid and fan-connecting by angle about that normal -- not by a subcase
+//  table (notes/16).  Ordering by angle is also what prevents the bowtie that an
+//  edge-order traversal produces.
+// --------------------------------------------------------------------------- //
+// Cut points a sub-cell can hold.  TWICE the edge count, not once: an edge whose
+// endpoints share a sign can carry TWO crossings (the multi-root case), and
+// since plan H both are kept rather than the second being dropped.  12 would be
+// the bound only under the old at-most-one-per-edge invariant.
+#define p_isoMaxCut 24
+// Triangles a sub-cell can emit.  NOT the textbook marching-cubes bound of 5:
+// this kernel has no 256x16 triangle table.  The
+// cell's cut points form one or more closed RINGS and each ring of nr points is
+// fanned into nr-2 triangles; summed over rings that is at most np-2, so the
+// bound follows p_isoMaxCut.  Using 5 here silently dropped triangles in any
+// sub-cell with >= 8 crossings, which is a HOLE in the surface (notes/24).
+#define p_isoMaxTri (p_isoMaxCut - 2)
+
+@kernel void isoTopologyOKL(const dlong Nelements,
+                            const int N,
+                            const dfloat level,
+                            const dlong capRoot,
+                            const dlong capCell,
+                            const dlong capPoint,
+                            const int cellOrder,
+                            @ restrict const dfloat *xn,
+                            @ restrict const dfloat *bw,
+                            @ restrict const dfloat *FLD,
+                            @ restrict const int *rootCount,
+                            @ restrict const dfloat *rootR,
+                            @ restrict const dfloat *rootS,
+                            @ restrict const dfloat *rootT,
+                            @ restrict const int *rootDir,
+                            @ restrict const int *rootJK,
+                            @ restrict const unsigned char *rootFlag,
+                            @ restrict int *cellCount,
+                            @ restrict int *ptCount,
+                            @ restrict int *conn,
+                            @ restrict dfloat *ptR,
+                            @ restrict dfloat *ptS,
+                            @ restrict dfloat *ptT,
+                            @ restrict int *ptRoot,
+                            @ restrict unsigned char *ptFlag,
+                            @ restrict unsigned char *cellFlag,
+                            @ restrict int *nUnseparated,
+                            @ restrict int *overflow) // a COUNT, not a bit: CUDA
+                                                      // can only transform @atomic
+                                                      // on a compound assignment,
+                                                      // and the count is the more
+                                                      // useful diagnostic anyway
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    @shared dfloat s_fld[p_Np];
+    @shared int s_edgePt[3 * p_Nq * p_Nq * p_Nq]; // (dir, j, k, cell) -> point id
+    // The SECOND crossing on the same lattice edge (plan H).  A fibre can carry
+    // two roots in one interval; both bracketing nodes then share a sign, so the
+    // marching mask cannot see the pair and the old code dropped it -- which did
+    // not leave a clean hole but let the fan bridge the gap, ADDING area
+    // (measured +9.3%, notes/26).  -1 when the edge carries at most one.
+    @shared int s_edgePt2[3 * p_Nq * p_Nq * p_Nq];
+    @shared int s_triCount[p_Nq * p_Nq * p_Nq]; // triangles emitted, per sub-cell
+    @shared int s_nPt[1];                       // @shared must be an ARRAY in OKL, even for a scalar
+
+    // load the element field and clear the edge table
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      if (t == 0) {
+        s_nPt[0] = 0;
+      }
+      for (int q = t; q < p_Nq * p_Nq * p_Nq; q += p_Nq * p_Nq) {
+        s_triCount[q] = 0;
+      }
+      for (int q = t; q < p_Np; q += p_Nq * p_Nq) {
+        s_fld[q] = FLD[e * p_Np + q] - level;
+      }
+      for (int q = t; q < 3 * p_Nq * p_Nq * p_Nq; q += p_Nq * p_Nq) {
+        s_edgePt[q] = -1;
+        s_edgePt2[q] = -1;
+      }
+    }
+    @barrier();
+
+    // ---- place each root on its lattice edge, and emit it as a point -------
+    // Serial in one thread: the point ORDER must be deterministic, because the
+    // host compares against v1 and because conn[] indexes it.  The work is
+    // O(roots), tiny beside the marching below.
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      if (t == 0) {
+        for (int q = 0; q < rootCount[e]; ++q) {
+          const dlong o = e * capRoot + q;
+          const int dir = rootDir[o];
+          const dfloat along = (dir == 0) ? rootR[o] : ((dir == 1) ? rootS[o] : rootT[o]);
+          int c = 0;
+          while (c < N - 1 && along > xn[c + 1]) {
+            ++c;
+          }
+          const int jj = rootJK[o] / p_Nq;
+          const int kk = rootJK[o] - jj * p_Nq;
+          const int slot = ((dir * p_Nq + jj) * p_Nq + kk) * p_Nq + c;
+          // A second root in the same interval is KEPT (plan H) rather than
+          // counted and dropped.  It still increments nUnseparated, so the
+          // statistic keeps its meaning: how many edges carry a pair.
+          const int second = (s_edgePt[slot] >= 0);
+          if (second) {
+            @atomic nUnseparated[0] += 1;
+            if (s_edgePt2[slot] >= 0) {
+              continue; // a THIRD root on one edge: beyond what the walk models
+            }
+          }
+          const int pid = s_nPt[0]++;
+          if (pid >= capPoint) {
+            @atomic overflow[0] += 1;
+            continue;
+          }
+          if (second) {
+            s_edgePt2[slot] = pid;
+          } else {
+            s_edgePt[slot] = pid;
+          }
+          const dlong po = e * capPoint + pid;
+          ptR[po] = rootR[o];
+          ptS[po] = rootS[o];
+          ptT[po] = rootT[o];
+          ptRoot[po] = q;
+          ptFlag[po] = rootFlag[o];
+        }
+      }
+    }
+    @barrier();
+
+    // ---- march the N^3 sub-cells ------------------------------------------
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      for (int cell = t; cell < N * N * N; cell += p_Nq * p_Nq) {
+        const int ci = cell / (N * N);
+        const int rem = cell - ci * N * N;
+        const int cj = rem / N;
+        const int ck = rem - cj * N;
+
+        int idx = 0;
+        for (int cc = 0; cc < 8; ++cc) {
+          const int bi = cc & 1, bj = (cc >> 1) & 1, bk = (cc >> 2) & 1;
+          if (s_fld[((ck + bk) * p_Nq + (cj + bj)) * p_Nq + (ci + bi)] < 0.0) {
+            idx |= (1 << cc);
+          }
+        }
+        if (idx == 0 || idx == 255) {
+          continue;
+        }
+
+        // ---- gather the cut points, from BOTH slots of every edge ------
+        //
+        // Driven by what is actually there, not by the sign mask: the mask is
+        // computed from corner signs and a same-signed pair is invisible to it
+        // by construction.  An edge contributes 0, 1 or 2 points.
+        int pts[p_isoMaxCut];
+        dfloat prst[p_isoMaxCut][3];
+        int ePt[12][2]; // per cube edge, up to two point ids, in order along it
+        int np = 0;
+        for (int en = 0; en < 12; ++en) {
+          ePt[en][0] = -1;
+          ePt[en][1] = -1;
+          int ca, cb, d;
+          isoCubeEdgeDev(en, &ca, &cb, &d);
+          const int ai = ca & 1, aj = (ca >> 1) & 1, ak = (ca >> 2) & 1;
+          int slot;
+          if (d == 0) {
+            slot = (((0) * p_Nq + (cj + aj)) * p_Nq + (ck + ak)) * p_Nq + ci;
+          } else if (d == 1) {
+            slot = (((1) * p_Nq + (ci + ai)) * p_Nq + (ck + ak)) * p_Nq + cj;
+          } else {
+            slot = (((2) * p_Nq + (ci + ai)) * p_Nq + (cj + aj)) * p_Nq + ck;
+          }
+          for (int w = 0; w < 2; ++w) {
+            const int pid = (w == 0) ? s_edgePt[slot] : s_edgePt2[slot];
+            if (pid < 0) {
+              continue;
+            }
+            if (np >= p_isoMaxCut) {
+              @atomic overflow[0] += 1;
+              break;
+            }
+            const dlong po = e * capPoint + pid;
+            prst[np][0] = ptR[po];
+            prst[np][1] = ptS[po];
+            prst[np][2] = ptT[po];
+            pts[np] = pid;
+            ePt[en][w] = np; // index into pts/prst, NOT the global point id
+            ++np;
+          }
+          // order the two by position along the edge, so a face walk that
+          // traverses this edge backwards can simply read them in reverse
+          if (ePt[en][0] >= 0 && ePt[en][1] >= 0) {
+            const dfloat t0 = prst[ePt[en][0]][d];
+            const dfloat t1 = prst[ePt[en][1]][d];
+            if (t1 < t0) {
+              const int sw = ePt[en][0];
+              ePt[en][0] = ePt[en][1];
+              ePt[en][1] = sw;
+            }
+          }
+        }
+        if (np < 3) {
+          continue;
+        }
+
+        // ---- chain the face segments into RINGS (plan H) ----------------
+        //
+        // A face is shared by exactly two cells and both see that face's own
+        // four edges, so the segments below are computed from data both sides
+        // share: the two cells cannot disagree and the surface cannot crack.
+        // Walking the face boundary in CYCLIC order and pairing consecutive
+        // crossings is the marching-squares rule; a face traversed backwards
+        // reads its two points in reverse, which is what ePt[.][0..1] ordering
+        // by position along the edge is for.
+        //
+        // This replaces the angular fan unconditionally.  On PLANAR cells it
+        // reproduces the fan's cyclic order exactly (54/54 configurations,
+        // notes/26); where it differs the cell is non-planar and the fan was
+        // ordering points in a plane of best fit that does not exist.
+        int segA[p_isoMaxCut], segB[p_isoMaxCut];
+        int nseg = 0;
+        int ambFace = 0; // any face of this cell needed the decider (plan I)
+        for (int f = 0; f < 6; ++f) {
+          int walk[4 * 2];
+          int nw = 0;
+          for (int m = 0; m < 4; ++m) {
+            int en, fwd;
+            isoFaceEdgeDev(f, m, &en, &fwd);
+            if (en < 0) {
+              continue;
+            }
+            const int p0 = ePt[en][0], p1 = ePt[en][1];
+            // NOTE `walk[nw++] = p` does not parse in OKL ("Ambiguous
+            // operator"): a post-increment cannot be used as an index.  Split
+            // the store from the increment (notes/22).
+            const int q0 = fwd ? p0 : p1;
+            const int q1 = fwd ? p1 : p0;
+            if (q0 >= 0) {
+              walk[nw] = q0;
+              ++nw;
+            }
+            if (q1 >= 0) {
+              walk[nw] = q1;
+              ++nw;
+            }
+          }
+          // Four crossings on one face is the AMBIGUOUS configuration: pairing
+          // (0,1)(2,3) and (1,2)(3,0) are both consistent with the corner signs
+          // and give different topology.  Ask the field (plan I) instead of
+          // always taking the first -- which is what classical marching cubes
+          // does, and what this scheme exists not to do.
+          int rot = 0;
+          if (nw == 4) {
+            int fc[4];
+            isoFaceCornersDev(f, fc);
+            dfloat cv[4];
+            int ii[4], jj[4], kk[4];
+            for (int m = 0; m < 4; ++m) {
+              ii[m] = ci + (fc[m] & 1);
+              jj[m] = cj + ((fc[m] >> 1) & 1);
+              kk[m] = ck + ((fc[m] >> 2) & 1);
+              cv[m] = s_fld[(kk[m] * p_Nq + jj[m]) * p_Nq + ii[m]];
+            }
+            // EVALUATE THE POLYNOMIAL AT THE FACE CENTRE.  Measured against a
+            // flood-fill of the real field on 56 ambiguous faces (plan I step 4):
+            //
+            //    bilinear saddle            44/56  (79%)
+            //    polynomial at that saddle  48/56  (86%)
+            //    polynomial at face CENTRE  55/56  (98%)
+            //
+            // The bilinear saddle is the right point for the bilinear model and
+            // the wrong point for this one: the saddle is derived from four
+            // corner values, and on a degree-N face it can land far from where
+            // the real level set actually pinches.  The centre needs no model at
+            // all.  The single failure sits 1.1e-02 from the level set, where
+            // the two topologies are closer than the discretisation.
+            const dfloat rc = 0.5 * (xn[ii[0]] + xn[ii[2]]);
+            const dfloat sc = 0.5 * (xn[jj[0]] + xn[jj[2]]);
+            const dfloat tc = 0.5 * (xn[kk[0]] + xn[kk[2]]);
+            dfloat Lr[p_Nq], Ls[p_Nq], Lt[p_Nq];
+            isoBaryWeightsDev(xn, bw, p_Nq, rc, Lr);
+            isoBaryWeightsDev(xn, bw, p_Nq, sc, Ls);
+            isoBaryWeightsDev(xn, bw, p_Nq, tc, Lt);
+            const dfloat mid = isoTensorEvalDev(s_fld, p_Nq, Lr, Ls, Lt);
+            // The pair joined THROUGH the face is the one whose sign matches the
+            // interior.  Pairing from crossing 0 joins the boundary stretch that
+            // follows it, whose sign is that of corner 1.
+            if ((mid < 0.0) != (cv[1] < 0.0)) {
+              rot = 1; // take (1,2)(3,0) instead of (0,1)(2,3)
+            }
+            ambFace = 1;
+          }
+          // `rot` is only ever 1 when nw == 4, so the wrap is modulo nw and
+          // never reorders a 2- or 6-point face.
+          for (int m = 0; m + 1 < nw; m += 2) {
+            if (nseg < p_isoMaxCut) {
+              const int i0 = (m + rot) % nw;
+              const int i1 = (m + 1 + rot) % nw;
+              segA[nseg] = walk[i0];
+              segB[nseg] = walk[i1];
+              ++nseg;
+            }
+          }
+        }
+
+        // Follow unused segments.  Every cut point lies on exactly two faces
+        // and so has exactly two segments, making the chain a disjoint union of
+        // cycles.  Track used SEGMENTS, not visited points: two points joined on
+        // both of their shared faces form a legal 2-cycle (a small sheet cut off
+        // by a restored pair), and a visited-point test breaks the chain there.
+        int usedSeg = 0; // bitmask, nseg <= p_isoMaxCut <= 24
+        int ring[p_isoMaxCut];
+        int local = 0;
+        for (int s0 = 0; s0 < np; ++s0) {
+          while (1) {
+            int si = -1;
+            for (int i = 0; i < nseg; ++i) {
+              if (!((usedSeg >> i) & 1) && (segA[i] == s0 || segB[i] == s0)) {
+                si = i;
+                break;
+              }
+            }
+            if (si < 0) {
+              break;
+            }
+            int nr = 0;
+            ring[nr] = s0;
+            ++nr;
+            int cur = s0;
+            while (1) {
+              usedSeg |= (1 << si);
+              cur = (segA[si] == cur) ? segB[si] : segA[si];
+              if (cur == s0) {
+                break; // closed
+              }
+              if (nr < p_isoMaxCut) {
+                ring[nr] = cur;
+                ++nr;
+              }
+              int nx = -1;
+              for (int i = 0; i < nseg; ++i) {
+                if (!((usedSeg >> i) & 1) && (segA[i] == cur || segB[i] == cur)) {
+                  nx = i;
+                  break;
+                }
+              }
+              if (nx < 0) {
+                break; // open chain: cannot happen for a closed surface
+              }
+              si = nx;
+            }
+            if (nr < 3) {
+              continue; // a 2-cycle bounds no area
+            }
+
+            // fan THIS ring, from its first vertex
+            // Ambiguous: a face of this cell had four crossings and the pairing
+            // was decided by the field, OR this ring has more than four points.
+            // The first is the MC33 case and is what the angular fan used to
+            // flag; plan H dropped the flag with the fan and plan I restores it.
+            unsigned char cfl = 0;
+            if (nr > 4 || ambFace) {
+              cfl |= 1; // Ambiguous
+            }
+            for (int q = 1; q + 1 < nr; ++q) {
+              const int a = pts[ring[0]], b = pts[ring[q]], c = pts[ring[q + 1]];
+              if (a == b || b == c || a == c) {
+                continue;
+              }
+              if (local >= p_isoMaxTri) {
+                @atomic overflow[0] += 1;
+                break;
+              }
+              const int cid = p_isoMaxTri * cell + local;
+              ++local;
+              if (cid >= capCell) {
+                @atomic overflow[0] += 1;
+                continue;
+              }
+              const dlong co = (e * capCell + cid) * 6; // room for P2
+              conn[co + 0] = a;
+              conn[co + 1] = b;
+              conn[co + 2] = c;
+              cellFlag[e * capCell + cid] = cfl;
+            }
+          }
+        }
+        s_triCount[cell] = local;
+      }
+    }
+    @barrier();
+
+    // Compact the fixed slices into a dense [0, nCell) range.  One thread, so
+    // the order is deterministic: sub-cell-major, matching v1's element loop.
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      if (t == 0) {
+        int dense = 0;
+        for (int cell = 0; cell < N * N * N; ++cell) {
+          for (int q = 0; q < s_triCount[cell]; ++q) {
+            const dlong src = (e * capCell + p_isoMaxTri * cell + q) * 6;
+            const dlong dst = (e * capCell + dense) * 6;
+            if (src != dst) {
+              conn[dst + 0] = conn[src + 0];
+              conn[dst + 1] = conn[src + 1];
+              conn[dst + 2] = conn[src + 2];
+              cellFlag[e * capCell + dense] = cellFlag[e * capCell + p_isoMaxTri * cell + q];
+            }
+            ++dense;
+          }
+        }
+        cellCount[e] = dense;
+        ptCount[e] = s_nPt[0];
+      }
+    }
+  }
+}
+
+// --------------------------------------------------------------------------- //
+//  isoProjectOKL -- the P2 midside nodes, Newton-projected onto the level set.
+//
+//  FIXED niterProj sweeps, no convergence test, no early exit: identical work
+//  per thread.  The start is a chord midpoint between two exact roots, already
+//  O(h^2) out, so convergence is quadratic from the first step -- measured
+//  4.4e-2 -> 1.7e-3 -> 2.5e-6 -> 5.0e-12, constant 0.83 = 1/(2R) (notes/17).
+//
+//  `lock` is a 3-bit mask of directions held FIXED.  A node whose two parents
+//  both sit on a shared element face must stay ON that face: the unconstrained
+//  step has a normal component, and the two elements sharing the face walk their
+//  copies apart, which is a visible crack at P2 (measured 1.8e-3 -> 1.0e-15 with
+//  the lock).  Locked gradient components are zeroed BEFORE the step, making it
+//  an exact Newton step for f restricted to the face, so the quadratic rate
+//  survives; zeroing after would be a projected step and only linear.
+//
+//  Clamping to [-1,1] is separate and also necessary -- a step can overshoot out
+//  of the element -- but it cannot fix the crack, because the drifting node
+//  moves INWARD and never leaves the cube.
+// --------------------------------------------------------------------------- //
+@kernel void isoProjectOKL(const dlong Nelements,
+                           const dlong capPoint,
+                           const int niterProj,
+                           @ restrict const int *midBase, // first midside slot, per element
+                           const dfloat gradRelTol,
+                           const dfloat level,
+                           @ restrict const dfloat *xn,
+                           @ restrict const dfloat *bw,
+                           @ restrict const dfloat *FLD,
+                           @ restrict const int *midCount,
+                           @ restrict const int *midLock,
+                           @ restrict dfloat *ptR,
+                           @ restrict dfloat *ptS,
+                           @ restrict dfloat *ptT,
+                           @ restrict unsigned char *ptFlag,
+                           @ restrict int *nDegenerate,
+                           // Convergence report, so a user can judge niterProj
+                           // instead of guessing: the largest residual left at
+                           // any midside node, and how many are still above
+                           // tolerance.  Newton is NOT iterated to convergence
+                           // here -- niterProj is a fixed count -- so a surface
+                           // that curves sharply over one sub-cell can leave
+                           // nodes short, and only a measurement says so.
+                           // Scaled as an int (resid/scale * 1e9) because OKL
+                           // has no atomic max on a float.
+                           @ restrict int *projResidQ,
+                           @ restrict int *nProjShort)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    @shared dfloat s_fld[p_Np];
+    @shared dfloat s_scale[1]; // @shared must be an ARRAY in OKL
+
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      for (int q = t; q < p_Np; q += p_Nq * p_Nq) {
+        s_fld[q] = FLD[e * p_Np + q] - level;
+      }
+    }
+    @barrier();
+
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      if (t == 0) {
+        dfloat mx = 0.0;
+        for (int q = 0; q < p_Np; ++q) {
+          const dfloat v = fabs(s_fld[q]);
+          mx = (v > mx) ? v : mx;
+        }
+        s_scale[0] = (mx > 0.0) ? mx : 1.0;
+      }
+    }
+    @barrier();
+
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      // Midside nodes live AFTER the corners in the element's slab, and the
+      // corner count varies per element, so the base is an array -- a constant
+      // offset (deviceMemory::slice) cannot express it.  Slot 0 would overwrite
+      // the corners isoTopologyOKL wrote.
+      for (int m = t; m < midCount[e]; m += p_Nq * p_Nq) {
+        const dlong o = e * capPoint + midBase[e] + m;
+        const int lock = midLock[e * capPoint + m]; // lock is indexed WITHOUT the base
+        dfloat q0 = ptR[o], q1 = ptS[o], q2 = ptT[o];
+        const dfloat gTol = gradRelTol * s_scale[0];
+        int full = 1;
+
+        for (int it = 0; it < niterProj; ++it) {
+          dfloat Lr[p_Nq], Ls[p_Nq], Lt[p_Nq], Dr[p_Nq], Ds[p_Nq], Dt[p_Nq], g[3];
+          isoBaryWeightsDev(xn, bw, p_Nq, q0, Lr);
+          isoBaryWeightsDev(xn, bw, p_Nq, q1, Ls);
+          isoBaryWeightsDev(xn, bw, p_Nq, q2, Lt);
+          isoBaryDerivDev(xn, bw, p_Nq, q0, Dr);
+          isoBaryDerivDev(xn, bw, p_Nq, q1, Ds);
+          isoBaryDerivDev(xn, bw, p_Nq, q2, Dt);
+          const dfloat f = isoTensorEvalGradDev(s_fld, p_Nq, Lr, Ls, Lt, Dr, Ds, Dt, g);
+
+          // restrict the gradient to the FREE subspace, before the step
+          for (int d = 0; d < 3; ++d) {
+            if (lock & (1 << d)) {
+              g[d] = 0.0;
+            }
+          }
+          const dfloat g2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+          const dfloat gn = sqrt(g2);
+          const dfloat sc = (gn > gTol) ? (f / g2) : 0.0; // a mask, not a branch out
+          // lock == 0b111 is a cube corner: no free direction, so a zero
+          // gradient is the constraint working, not a degeneracy (see the host
+          // note in isoKernels.hpp::newtonProject)
+          if (gn <= gTol && lock != 0x7) {
+            full = 0;
+          }
+          dfloat v0 = q0 - sc * g[0];
+          dfloat v1 = q1 - sc * g[1];
+          dfloat v2 = q2 - sc * g[2];
+          q0 = (v0 < -1.0) ? -1.0 : ((v0 > 1.0) ? 1.0 : v0);
+          q1 = (v1 < -1.0) ? -1.0 : ((v1 > 1.0) ? 1.0 : v1);
+          q2 = (v2 < -1.0) ? -1.0 : ((v2 > 1.0) ? 1.0 : v2);
+        }
+
+        ptR[o] = q0;
+        ptS[o] = q1;
+        ptT[o] = q2;
+        if (!full) {
+          ptFlag[o] = 1; // Tangency
+          @atomic nDegenerate[0] += 1;
+        }
+
+        // What did the last step actually leave behind?  One extra evaluation
+        // per midside node, only to report it.
+        {
+          dfloat Lr[p_Nq], Ls[p_Nq], Lt[p_Nq];
+          isoBaryWeightsDev(xn, bw, p_Nq, q0, Lr);
+          isoBaryWeightsDev(xn, bw, p_Nq, q1, Ls);
+          isoBaryWeightsDev(xn, bw, p_Nq, q2, Lt);
+          const dfloat rel = fabs(isoTensorEvalDev(s_fld, p_Nq, Lr, Ls, Lt)) / s_scale[0];
+          // No atomic max in OKL (notes/22: @atomic must be a compound
+          // assignment, and there is no capture), so the maximum is taken by
+          // BUCKETING: one counter per decade of residual.  That is more useful
+          // than a bare maximum anyway -- it shows whether a handful of nodes
+          // are short or a whole population is.
+          if (rel > 1.0e-6) {
+            @atomic nProjShort[0] += 1;
+          }
+          int bucket = 0; // 0: <=1e-9  1: 1e-8  2: 1e-7 ... 6: >1e-3
+          if (rel > 1.0e-3) {
+            bucket = 6;
+          } else if (rel > 1.0e-4) {
+            bucket = 5;
+          } else if (rel > 1.0e-5) {
+            bucket = 4;
+          } else if (rel > 1.0e-6) {
+            bucket = 3;
+          } else if (rel > 1.0e-7) {
+            bucket = 2;
+          } else if (rel > 1.0e-8) {
+            bucket = 1;
+          }
+          @atomic projResidQ[bucket] += 1;
+        }
+      }
+    }
+  }
+}
+
+// --------------------------------------------------------------------------- //
+//  isoInterpOKL -- sample the registered fields at every surface point.
+//
+//  The surface already carries (r,s,t) and the owning element for BOTH point
+//  groups (corners from the root, midside nodes written back by the projection),
+//  so every sample is a tensor contraction inside the element that already owns
+//  the point: no findpts, no search, no communication.
+//
+//  The basis weights are the expensive part and do not depend on the field, so
+//  they are computed ONCE per point and reused across every field and component
+//  (notes/18).
+// --------------------------------------------------------------------------- //
+@kernel void isoInterpOKL(const dlong Nelements,
+                          const dlong capPoint,
+                          const dlong fieldOffset,
+                          const int nComp,
+                          @ restrict const dfloat *xn,
+                          @ restrict const dfloat *bw,
+                          @ restrict const dfloat *SRC,
+                          @ restrict const int *ptCount,
+                          @ restrict const dfloat *ptR,
+                          @ restrict const dfloat *ptS,
+                          @ restrict const dfloat *ptT,
+                          @ restrict dfloat *OUT)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    @shared dfloat s_src[p_Np];
+
+    for (int c = 0; c < nComp; ++c) {
+      for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+        for (int q = t; q < p_Np; q += p_Nq * p_Nq) {
+          s_src[q] = SRC[c * fieldOffset + e * p_Np + q];
+        }
+      }
+      @barrier();
+
+      for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+        for (int m = t; m < ptCount[e]; m += p_Nq * p_Nq) {
+          const dlong o = e * capPoint + m;
+          dfloat Lr[p_Nq], Ls[p_Nq], Lt[p_Nq];
+          isoBaryWeightsDev(xn, bw, p_Nq, ptR[o], Lr);
+          isoBaryWeightsDev(xn, bw, p_Nq, ptS[o], Ls);
+          isoBaryWeightsDev(xn, bw, p_Nq, ptT[o], Lt);
+          OUT[o * nComp + c] = isoTensorEvalDev(s_src, p_Nq, Lr, Ls, Lt);
+        }
+      }
+      @barrier();
+    }
+  }
+}
+
+// --------------------------------------------------------------------------- //
+//  isoCompactOKL -- gather the per-element capacity slabs into a dense array.
+//
+//  Everything above writes into `e * cap + slot`, which is sparse: most elements
+//  use a small fraction of their capacity.  Copying the whole slab to the host
+//  would move ~5x more bytes than there is data.  This kernel scatters into the
+//  dense layout using a per-element offset the host has prefix-summed, so the
+//  device->host copy is exactly the size of the result.
+//
+//  Element-major and stable: within an element the order is preserved, which is
+//  what lets the host compare against v1 without re-sorting.
+// --------------------------------------------------------------------------- //
+@kernel void isoCompactPointsOKL(const dlong Nelements,
+                                 const dlong capPoint,
+                                 @ restrict const int *ptCount,
+                                 @ restrict const dlong *ptOffset,
+                                 @ restrict const dfloat *ptR,
+                                 @ restrict const dfloat *ptS,
+                                 @ restrict const dfloat *ptT,
+                                 @ restrict const int *ptRoot,
+                                 @ restrict const unsigned char *ptFlag,
+                                 @ restrict dfloat *outR,
+                                 @ restrict dfloat *outS,
+                                 @ restrict dfloat *outT,
+                                 @ restrict int *outElem,
+                                 @ restrict int *outRoot,
+                                 @ restrict unsigned char *outFlag)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      for (int m = t; m < ptCount[e]; m += p_Nq * p_Nq) {
+        const dlong src = e * capPoint + m;
+        const dlong dst = ptOffset[e] + m;
+        outR[dst] = ptR[src];
+        outS[dst] = ptS[src];
+        outT[dst] = ptT[src];
+        outElem[dst] = e;
+        outRoot[dst] = ptRoot[src];
+        outFlag[dst] = ptFlag[src];
+      }
+    }
+  }
+}
+
+// Cells, with the connectivity shifted from element-local to dense-global ids.
+@kernel void isoCompactCellsOKL(const dlong Nelements,
+                                const dlong capCell,
+                                const int nodesPerCell,
+                                @ restrict const int *cellCount,
+                                @ restrict const dlong *cellOffset,
+                                @ restrict const dlong *ptOffset,
+                                @ restrict const int *conn,
+                                @ restrict const unsigned char *cellFlag,
+                                @ restrict int *outConn,
+                                @ restrict unsigned char *outFlag)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      for (int c = t; c < cellCount[e]; c += p_Nq * p_Nq) {
+        const dlong src = (e * capCell + c) * 6;
+        const dlong dst = (cellOffset[e] + c) * nodesPerCell;
+        for (int m = 0; m < nodesPerCell; ++m) {
+          // element-local point id -> dense id
+          outConn[dst + m] = ((int)(ptOffset[e] + conn[src + m])); // parens: notes/22
+        }
+        outFlag[cellOffset[e] + c] = cellFlag[e * capCell + c];
+      }
+    }
+  }
+}
+
+// Interpolated field values, same gather.
+@kernel void isoCompactFieldOKL(const dlong Nelements,
+                                const dlong capPoint,
+                                const int nComp,
+                                @ restrict const int *ptCount,
+                                @ restrict const dlong *ptOffset,
+                                @ restrict const dfloat *val,
+                                @ restrict dfloat *out)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    for (int t = 0; t < p_Nq * p_Nq; ++t; @inner(0)) {
+      for (int m = t; m < ptCount[e]; m += p_Nq * p_Nq) {
+        const dlong src = (e * capPoint + m) * nComp;
+        const dlong dst = (ptOffset[e] + m) * nComp;
+        for (int c = 0; c < nComp; ++c) {
+          out[dst + c] = val[src + c];
+        }
+      }
+    }
+  }
+}

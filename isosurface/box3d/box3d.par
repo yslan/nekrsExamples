@@ -1,0 +1,41 @@
+[GENERAL]
+polynomialOrder = 5
+
+#startFrom = sst.fld+time=0
+
+# milestone-1 driver: the analytic tests run at tstep 0, so no flow solve is
+# needed.  Raise numSteps to exercise the live-field sampler as well.
+stopAt = numSteps
+numSteps = 0
+
+dt = targetCFL=0.5+initial=1e-3
+
+timeStepper = tombo2
+
+checkpointControl = simulationTime
+checkpointInterval = 100
+
+constFlowRate = meanVelocity=1.0 + direction=X
+
+scalars = k, tau
+
+[PROBLEMTYPE]
+equation = navierStokes+variableViscosity
+
+[FLUID PRESSURE]
+residualTol = 1.0e-04
+
+[FLUID VELOCITY]
+boundaryTypeMap = zeroDirichlet
+viscosity = 1./10595.
+rho = 1.0
+residualTol = 1.0e-06
+
+[SCALAR K]
+boundaryTypeMap = udfDirichlet 
+residualTol = 1e-08
+
+[SCALAR TAU]  
+boundaryTypeMap = udfDirichlet 
+residualTol = 1e-08
+

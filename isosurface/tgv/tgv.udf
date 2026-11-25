@@ -1,0 +1,110 @@
+// =========================================================================== //
+//  tgv.udf -- Taylor-Green vortex with a live isosurface of the Q-criterion.
+//
+//  This case exists to show how to use the isosurface plugin.  It is the
+//  smallest thing that produces the canonical picture: Q-criterion vortex
+//  tubes, coloured by velocity, written every checkpoint step.
+//
+//  The plugin is two files, and the include below is the whole integration:
+//
+//      isoSurface.okl   the kernels -- inside the __okl__ block
+//      isoSurface.hpp   the host side -- NOT inside any guard
+//
+//  See README.md for what this case is and is not.
+// =========================================================================== //
+#ifdef __okl__
+#include "isoSurface.okl"
+#endif
+
+#include "isoSurface.hpp"
+
+static deviceMemory<dfloat> o_Q;
+static std::unique_ptr<isoSurface> iso;
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options) {}
+
+void UDF_Setup()
+{
+  auto mesh = nrs->meshV;
+
+  // Taylor-Green initial condition on [-pi,pi]^3.
+  if (platform->options.getArgs("RESTART FILE NAME").empty()) {
+    auto [x, y, z] = mesh->xyzHost();
+    std::vector<dfloat> U(mesh->dim * nrs->fieldOffset, 0.0);
+    for (int n = 0; n < mesh->Nlocal; n++) {
+      U[n + 0 * nrs->fieldOffset] = sin(x[n]) * cos(y[n]) * cos(z[n]);
+      U[n + 1 * nrs->fieldOffset] = -cos(x[n]) * sin(y[n]) * cos(z[n]);
+      U[n + 2 * nrs->fieldOffset] = 0.0;
+    }
+    nrs->fluid->o_U.copyFrom(U.data(), U.size());
+  }
+
+  // Q lives on the device; nrs->Qcriterion fills it.  Registering it as a
+  // checkpoint field also puts it in the .fld, so the volume field and the
+  // surface extracted from it can be opened side by side.
+  o_Q.resize(mesh->Nlocal);
+  nrs->addUserCheckpointField("scalar00", std::vector<deviceMemory<dfloat>>{o_Q});
+
+  // ---- the plugin, set up once -------------------------------------------
+  // Nothing here depends on the field's VALUES, only on the mesh and on which
+  // device array to read, so it all belongs in setup.  o_Q is held by handle
+  // and re-read on every solve, so overwriting it in place is enough -- there
+  // is no re-registration and no host copy to keep in step.
+  IsoSurfaceParams prm;
+  prm.levels = {0.1, 0.01}; // two levels sharing ONE solve pass: the fibre roots
+                            // are found once per element and every level reads
+                            // them.  Q has units of 1/time^2, so these are
+                            // flow-specific: for TGV as initialized above,
+                            // |u| ~ 1, so 0.1 picks out the strong vortex cores
+                            // and 0.01 the weaker sheets around them.
+  prm.fileName = "isoQ";
+  prm.cellOrder = 2; // curved (P2) cells: ~25x better inside the triangle
+                     // than flat, for ~2.5 extra points per corner
+
+  // Newton steps that place each P2 midside node on the level set.  The default
+  // 3 is right for a smooth surface and too few where the surface curves
+  // sharply across one sub-cell -- a Q-criterion field in decaying turbulence
+  // does exactly that.  The run PRINTS the residual distribution, so raise this
+  // only if the report says nodes are left above 1e-4:
+  //
+  //   isoSurface(Q): projection niterProj=8, residual |f|/max|f| over N node(s):
+  //                  worst 1e-7
+  //
+  // Measured on demo_3d's folded case: 3 leaves nodes at 5e-02, 8 at 9e-03,
+  // 16 clears every case.  Each step is one tensor evaluation on midside nodes
+  // only, so this is not the expensive part of the pipeline.
+  prm.niterProj = 8;
+
+  iso = std::make_unique<isoSurface>(mesh, isoSurface::field{"Q", {o_Q}}, prm);
+
+  // Fields sampled onto the surface.  Registered once; the device arrays are
+  // re-read every dump, so a time-varying field needs no re-registration.
+  iso->setOutputFields(
+      {{"velocity", {nrs->fluid->o_solution("x"), nrs->fluid->o_solution("y"), nrs->fluid->o_solution("z")}},
+       {"pressure", {nrs->fluid->o_solution("pressure")}}});
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  // tstep 0 is the initial condition: the driver calls this once before the
+  // time loop (src/bin/driver.cpp:234) with checkpointStep = 0, so it needs
+  // naming explicitly.  After that, checkpointInterval in the .par drives it;
+  // with the reference value of 0 it never fires and nothing is written.
+  if (tstep == 0 || nrs->checkpointStep) {
+
+    nrs->Qcriterion(o_Q);
+
+    // `true` = re-solve the geometry: Q has changed, so the surface has moved.
+    // The plugin re-reads o_Q through the handle it was given in setup.
+    iso->process(time, tstep, true); // -> isoQ_fld_{00,01}_<SSSSS>.vtu
+    if (tstep == 0) {
+      nrs->writeCheckpoint(time);
+    }
+  }
+
+  // Release before nekrs::finalize(): the object owns MPI state, and a static
+  // unique_ptr destroyed at exit would free it after MPI_Finalize().
+  if (nrs->lastStep) {
+    iso.reset();
+  }
+}

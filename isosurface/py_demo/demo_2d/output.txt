@@ -1,0 +1,269 @@
+/Disk_K/src/nekrs_stefan_private_mhd/examples/periodicHill/wk_isosurface/demo_2d/run_demo.py:361: UserWarning: The input coordinates to pcolormesh are interpreted as cell centers, but are not monotonically increasing or decreasing. This may lead to incorrectly calculated cell edges, in which case, please supply explicit cell edges to pcolormesh.
+  ax.pcolormesh(XX, YY, Pf, cmap="RdBu_r", shading="auto",
+==============================================================================
+  2D contour extraction on a single GLL element
+  fiber solver: route C (Ehrlich-Aberth), self-contained kernel
+==============================================================================
+
+=== self-test of the hand-written kernel ===
+
+kernel2d self-test (no third-party numerics):
+  N= 4  ends 0e+00  sym 2e-32  sum(w) 0e+00  quad 1e-16  P'_N 4e-16  bary 3e-16  n<->m 2e-16  p' 2e-11  roots 1e-16
+  N= 7  ends 0e+00  sym 0e+00  sum(w) 2e-16  quad 2e-16  P'_N 3e-15  bary 1e-15  n<->m 5e-16  p' 2e-10  roots 1e-16
+  N=11  ends 0e+00  sym 0e+00  sum(w) 0e+00  quad 1e-16  P'_N 1e-14  bary 3e-15  n<->m 2e-15  p' 9e-11  roots 1e-16
+  ALL PASS: True
+
+  Routines checked: GLL nodes (endpoints, symmetry, sum of weights,
+  quadrature exact to degree 2N-1, interior nodes are roots of P'_N),
+  barycentric weights against the defining product, nodal<->modal round
+  trip, Legendre p' against central differences, and Aberth against a
+  polynomial with prescribed roots.
+
+=== all test cases (N=8, geometry='curved') ===
+
+  case        roots  segs  insert  saddle   max |f-c| at vertices
+  --------------------------------------------------------------------
+  circle         12    12       0       0                4.86e-17
+  twoblobs       16    16       0       0                2.30e-16
+  saddle         16    14       0       0                9.71e-17
+  tangency       24    16      12       1                1.07e-02
+  wave           59    58       7       0                2.12e-15
+  band           15    14       0       0                1.73e-16
+  corner          8     7       0       0                6.94e-17
+  ellipse        10    10       0       0                1.80e-16
+  wavycircle     14    14       0       0                1.27e-16
+
+  'max |f-c| at vertices' is the residual of the emitted points on the
+  true interpolant: machine precision means the vertices lie exactly on
+  the contour, not on a linear approximation of it.
+    circle     single closed loop: r^2+s^2 = 0.6^2
+    twoblobs   two disjoint components (tests component labelling)
+    saddle     hyperbola r*s = 0.15: the ambiguous marching-squares case
+    tangency   level tangent to the field: double root, sqrt(eps) accuracy
+    wave       oscillatory: several crossings per fiber
+    band       thin band: two roots inside one sub-cell edge (forces insertion)
+    corner     contour clipping the element corner (open arcs)
+    ellipse    elongated closed loop, off-centre
+    wavycircle r = 0.62 + 0.10 cos(3 theta): curvature varies along the loop
+
+  figure -> ../figs/E_contour_cases.png
+
+=== this method vs the two reference approaches ===
+
+  R1: treat the GLL nodal values as an N x N bilinear grid, marching
+      squares with linear edge interpolation.
+  R2: interpolate the field to a uniform MxM grid (M ~ 1.5N), then the
+      same marching squares.
+  Both use the SAME topology logic as ours; only the vertex locations
+  differ -- linear interpolation versus exact rootfinding.
+
+  case         N |       ours  R1 bilinear  R2 resampled |   R1/ours   R2/ours
+  ------------------------------------------------------------------------------
+  circle       4 |   1.00e-16     5.01e-02      2.29e-02 |   5.0e+14   2.3e+14
+  circle       6 |   1.11e-16     4.39e-02      9.92e-03 |   4.0e+14   8.9e+13
+  circle       8 |   1.00e-16     1.76e-02      5.71e-03 |   1.8e+14   5.7e+13
+  circle      12 |   1.00e-16     1.08e-02      2.56e-03 |   1.1e+14   2.6e+13
+  ellipse      4 |   1.20e-16     1.98e-01      3.82e-02 |   1.7e+15   3.2e+14
+  ellipse      6 |   1.17e-16     8.62e-02      1.68e-02 |   7.4e+14   1.4e+14
+  ellipse      8 |   1.00e-16     4.99e-02      9.17e-03 |   5.0e+14   9.2e+13
+  ellipse     12 |   1.28e-16     2.38e-02      3.82e-03 |   1.9e+14   3.0e+13
+  twoblobs     4 |   1.55e-01     1.12e-01      1.83e-01 |   7.3e-01   1.2e+00
+  twoblobs     6 |   4.23e-02     1.12e-01      6.35e-02 |   2.6e+00   1.5e+00
+  twoblobs     8 |   3.95e-02     6.11e-02      3.57e-02 |   1.5e+00   9.0e-01
+  twoblobs    12 |   2.35e-02     2.71e-02      1.81e-02 |   1.2e+00   7.7e-01
+  wavycircle   4 |   5.66e-02     4.87e-02      1.17e-01 |   8.6e-01   2.1e+00
+  wavycircle   6 |   5.65e-02     2.73e-02      5.04e-02 |   4.8e-01   8.9e-01
+  wavycircle   8 |   5.59e-02     3.04e-02      4.71e-02 |   5.4e-01   8.4e-01
+  wavycircle  12 |   2.13e-02     2.04e-02      2.55e-02 |   9.6e-01   1.2e+00
+
+  max distance of an emitted vertex from the TRUE level set.
+
+  READ THIS TABLE IN TWO HALVES.
+  'circle' and 'ellipse' are POLYNOMIAL in (r,s): the GLL interpolant is
+  exact, so the only error left is the contouring itself.  There our method
+  is at machine precision and the reference methods are 1e13-1e15 times
+  worse -- they are limited by LINEAR interpolation along a cell edge, which
+  resampling shrinks but never removes.
+
+  'twoblobs' and 'wavycircle' are NOT polynomials: the degree-N interpolant
+  cannot represent them, and that interpolation error swamps everything.
+  All three methods then agree to within a small factor -- exact rootfinding
+  buys nothing once the polynomial itself is the wrong curve.  This is the
+  conditioning floor of section 2, seen in 2D: a rootfinder cannot beat the
+  interpolant it is given.
+
+  figure -> ../figs/E_contour_accuracy.png
+
+=== how far can R2 be pushed by resampling? ===
+
+  R2 interpolates the degree-N field onto a uniform MxM grid, then contours
+  with LINEAR edge interpolation.  The field values are spectrally accurate,
+  but the CONTOURING is linear, so the vertex error is O(1/M^2).
+
+  case          M  grid pts  segments    R2 error    rate    vs ours
+  ------------------------------------------------------------------
+  circle        9        81        20    1.20e-02            1.2e+14
+  circle       13       169        28    5.71e-03    2.02    5.7e+13
+  circle       25       625        60    1.44e-03    2.10    1.4e+13
+  circle       50      2500       120    3.47e-04    2.06    3.5e+12
+  circle      100     10000       240    8.50e-05    2.03    8.5e+11
+  circle      200     40000       480    2.10e-05    2.01    2.1e+11
+  circle      400    160000       960    5.23e-06    2.01    5.2e+10
+  ellipse       9        81        18    2.49e-02            2.5e+14
+  ellipse      13       169        24    9.17e-03    2.72    9.2e+13
+  ellipse      25       625        54    2.37e-03    2.07    2.4e+13
+  ellipse      50      2500       104    6.19e-04    1.94    6.2e+12
+  ellipse     100     10000       216    1.78e-04    1.80    1.8e+12
+  ellipse     200     40000       432    4.75e-05    1.90    4.8e+11
+  ellipse     400    160000       868    1.16e-05    2.04    1.2e+11
+
+  'rate' is the observed order: err ~ M^-rate.  It sits near 2, the
+  order of linear interpolation -- refining the grid never reaches the
+  accuracy the degree-N field already contains.  To match our 1e-16 by
+  refinement alone would need M ~ 1e8, i.e. 1e16 grid points per element.
+
+  Our method uses 2(N+1) = 18 fibre solves and no resampling at all.
+
+  figure -> ../figs/E_contour_r2sweep.png
+
+=== the same contour on three geometries (N=8) ===
+
+  The fiber solve happens entirely in the REFERENCE element and is
+  unaffected by the deformation: the roots in (r,s) are identical.
+  Only the map-out changes.
+
+  geometry    segments   ref roots identical   physical arc length
+  ----------------------------------------------------------------
+  straight          12                   yes              3.713289
+  curved            12                   yes              3.781078
+  annulus           12                   yes              3.303375
+
+  Same reference roots, three different physical curves: the geometry
+  enters only through the isoparametric map, never through the solve.
+  figure -> ../figs/E_contour_geometry.png
+
+=== high-order refinement of the extracted contour (N=8) ===
+
+  The marching step emits straight segments between EXACT vertices.  The
+  chord between them is the only error left.  Two ways to remove it, both
+  using information the polynomial already has -- neither is a fit:
+    hermite : exact unit tangents (grad f is perpendicular to the contour)
+              -> cubic Hermite, C^1 at every vertex
+    project : subdivide, then Newton each new point onto the contour,
+              x <- x - f grad f/|grad f|^2 .  The new nodes are exact roots.
+
+  Error is the max distance of the WHOLE curve (sampled at 65 points per
+  segment, between the nodes as well as at them) from the true level set.
+
+  case          k  pts/seg |    straight     hermite     project |   H gain   P gain
+  ----------------------------------------------------------------------------------
+  circle        0        2 |    3.14e-02    3.14e-02    3.14e-02 |     1.0x     1.0x
+  circle        1        3 |    3.14e-02    8.31e-03    7.90e-03 |     3.8x     4.0x
+  circle        3        5 |    3.14e-02    2.65e-03    2.01e-03 |    11.9x    15.6x
+  circle        7        9 |    3.14e-02    1.28e-03    5.04e-04 |    24.6x    62.3x
+  circle       15       17 |    3.14e-02    9.35e-04    1.26e-04 |    33.6x   249.1x
+  circle       31       33 |    3.14e-02    8.50e-04    3.15e-05 |    36.9x   996.0x
+  ellipse       0        2 |    7.19e-02    7.19e-02    7.19e-02 |     1.0x     1.0x
+  ellipse       1        3 |    7.19e-02    2.47e-02    1.92e-02 |     2.9x     3.7x
+  ellipse       3        5 |    7.19e-02    1.36e-02    5.27e-03 |     5.3x    13.6x
+  ellipse       7        9 |    7.19e-02    1.13e-02    1.32e-03 |     6.4x    54.4x
+  ellipse      15       17 |    7.19e-02    1.07e-02    3.26e-04 |     6.7x   220.8x
+  ellipse      31       33 |    7.19e-02    1.06e-02    7.85e-05 |     6.8x   915.5x
+  twoblobs      0        2 |    4.96e-02    4.96e-02    4.96e-02 |     1.0x     1.0x
+  twoblobs      1        3 |    4.96e-02    3.95e-02    4.08e-02 |     1.3x     1.2x
+  twoblobs      3        5 |    4.96e-02    4.10e-02    5.39e-02 |     1.2x     0.9x
+  twoblobs      7        9 |    4.96e-02    4.54e-02    5.40e-02 |     1.1x     0.9x
+  twoblobs     15       17 |    4.96e-02    4.54e-02    5.40e-02 |     1.1x     0.9x
+  twoblobs     31       33 |    4.96e-02    4.55e-02    5.40e-02 |     1.1x     0.9x
+  wavycircle    0        2 |    6.98e-02    6.98e-02    6.98e-02 |     1.0x     1.0x
+  wavycircle    1        3 |    6.98e-02    5.59e-02    5.59e-02 |     1.2x     1.2x
+  wavycircle    3        5 |    6.98e-02    5.59e-02    5.59e-02 |     1.2x     1.2x
+  wavycircle    7        9 |    6.98e-02    5.59e-02    5.59e-02 |     1.2x     1.2x
+  wavycircle   15       17 |    6.98e-02    5.59e-02    5.59e-02 |     1.2x     1.2x
+  wavycircle   31       33 |    6.98e-02    5.59e-02    5.59e-02 |     1.2x     1.2x
+
+  Reading the table:
+  * straight is flat in k -- subdividing a chord does not move it.
+  * hermite gains an order of magnitude immediately, then PLATEAUS: a cubic
+    cannot represent the contour exactly, so refining it converges to the
+    cubic's own error (circle: 8.5e-04 at k=31, already 9.4e-04 at k=15).
+  * project keeps converging, because every added node is an exact root;
+    only the chords between them remain, and those shrink with k.
+  * on 'twoblobs' and 'wavycircle' all three tie: the interpolant itself
+    is the wrong curve (the conditioning floor), and no refinement of a
+    wrong curve helps.
+
+  Cost per added point: hermite ~2 gradient evals (once per vertex,
+  amortised); project adds 3 Newton steps x 3 evaluations.
+
+  figure -> ../figs/E_contour_refine.png
+
+=== 3D: the full pipeline on one element (N=8, geometry='curved') ===
+
+  marching-cubes edge table generated and verified: True
+  (built here from the cube's edge topology -- no third-party table)
+
+  Each 3D case is the DIRECT EXTENSION of the 2D case of the same name:
+  same formula with a t-term, same isolevel, so the t=0 slice of the 3D
+  field IS the 2D field.  Verified:
+    all 9 shared cases reduce exactly (0 mismatches); 'torus' has no 2D analogue.
+
+  case         solves  roots   tris  multi-edge  saddle     at nodes    flat tri   projected
+  --------------------------------------------------------------------------------------------
+  circle          243     54    104           0      24     6.59e-17    6.43e-02    4.70e-03
+  twoblobs        243     30     52           0       2     2.30e-16    5.93e-02    1.61e-02
+  saddle          243    167    268           0      18     1.46e-16    2.93e-02    2.06e-03
+  tangency        243     60      0           0       0     0.00e+00    0.00e+00    0.00e+00
+  wave            243    618    878           0     136     1.18e-15    5.53e-01    2.60e+00
+  band            243     49     84           0       8     1.73e-16    2.00e-01    2.53e-02
+  corner          243    102    163           0      24     2.50e-16    3.98e-16    3.89e-16
+  ellipse         243     42     80           0      12     2.08e-16    1.30e-01    1.35e-02
+  wavycircle      243     66    128           0      16     1.25e-16    1.18e-01    1.37e-02
+  torus           243     64    128           0      16     1.32e-16    9.43e-02    9.65e-03
+
+  'at nodes'  : |f-c| at the triangle corners -- machine precision, they
+                are exact fibre roots.
+  'flat tri'  : |f-c| sampled INSIDE the flat triangles -- the chord error,
+                the only thing left after exact vertices.
+  'projected' : after 2 subdivisions with every new node projected onto the
+                surface (x <- x - f grad f/|grad f|^2).  ~4x smaller per
+                subdivision, and the surface renders smooth.
+
+  NOTE on 'tangency': the field (r^2+s^2+t^2-0.5)^2 is a perfect square and
+  is non-negative everywhere, so it TOUCHES the level without crossing.  No
+  marching-cubes corner sign changes and 0 triangles are emitted -- which is
+  correct: a measure-zero tangency is not a surface MC can represent.  The
+  fibre solver nevertheless finds the tangency locus (60 roots), with p'~0
+  flagging every one of them.  This is the section-2 tangency case seen in 3D:
+  detect and report, do not pretend to triangulate.
+    circle      sphere r^2+s^2+t^2 = 0.6^2  [2D 'circle' + t^2]
+    twoblobs    two disjoint spheres  [2D 'twoblobs' + t-offset]
+    saddle      r*s + 0.25 t = 0.15: the ambiguous case  [2D 'saddle' + 0.25t]
+    tangency    (r^2+s^2+t^2-0.5)^2 = 0: double root  [2D 'tangency' + t^2]
+    wave        sin(2.6 pi r) + cos(2.2 pi s) + 0.6 sin(1.8 pi t) = 0.3  [2D 'wave' + t]
+    band        thin sheet: forces line insertion  [2D 'band' + t]
+    corner      r+s+t = 1.15: plane clipping the corner  [2D 'corner' + t]
+    ellipse     ellipsoid r^2 + 2.6(s-0.12)^2 + 1.6 t^2  [2D 'ellipse' + 1.6t^2]
+    wavycircle  wavy sphere  [2D 'wavycircle' + t^2]
+    torus       genus-1 tube (NO 2D analogue: topology that needs 3D)
+
+  figure -> ../figs/E_surface3d.png
+  figure -> ../figs/E_surface3d_cut.png
+
+=== cost accounting (N=8) ===
+
+  2D, one element:
+    fiber solves           2(N+1) = 18
+    marching cells         N^2    = 64
+    inserted lines         2.11 per case (average over 9 cases)
+    field evaluations      only at saddle cells and on inserted lines
+
+  3D extrapolation, one element:
+    fiber solves           3(N+1)^2 = 243
+    marching cells         N^3      = 512
+    roots, worst case      3(N+1)^2 N = 1944
+    roots, realistic       ~0.36/fiber = 87
+
+  storage per element (realistic), r + xyz in fp32:
+    87 roots x 4 floats x 4 B = 1400 B
+    worst case: 1944 x 16 B = 30.4 KiB

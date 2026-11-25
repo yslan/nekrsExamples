@@ -1,0 +1,182 @@
+================================================================================
+  route A PLAIN (no deflation)   [a_floor = 0]
+  single GLL reference element on [-1,1], orders 3,4,5,6,7,8,9,10,11,12,13,14,15
+================================================================================
+
+=== route A PLAIN (no deflation): convergence -- max |root error| vs N ===
+
+  field      nr | N=3     N=4     N=5     N=6     N=7     N=8     N=9     N=10    N=11    N=12    N=13    N=14    N=15   
+  -----------------------------------------------------------------------------------------------------------------------
+  poly5       5 | 4.8e-01 4.7e-01 1.0e-15 4.2e-01 8.7e-11 1.9e-12 5.1e-14 2.5e-14 7.0e-15 1.3e-15 5.2e-15 2.5e-15 3.9e-15
+  tangent     3 | 4.2e-09 6.0e-01 6.8e-09 2.0e-12 4.5e-07 8.1e-14 1.6e-13 7.1e-08 8.9e-16 6.8e-08 9.4e-09 8.9e-08 1.9e-14
+  gauss       2 | 1.8e-01 1.2e-01 5.1e-02 2.8e-02 2.4e-03 4.6e-03 1.6e-03 3.4e-04 2.1e-04 1.1e-04 7.2e-06 1.4e-05 2.6e-06
+  tanh        1 | 9.0e-02 1.4e-01 1.7e-02 3.8e-02 2.8e-02 3.6e-03 2.6e-02 2.0e-03 1.3e-02 1.1e-03 4.5e-03 3.2e-03 7.7e-04
+  runge       2 |  FAIL   2.6e-01 1.7e-01 1.6e-01 1.2e-01 9.9e-02 7.4e-02 6.3e-02 3.7e-02 3.9e-02 1.3e-02 2.3e-02 2.8e-04
+  sine2       4 | 1.2e+00 2.3e-01 1.4e-01 1.5e-01 1.5e-02 1.5e-02 1.9e-03 1.6e-03 2.4e-04 1.2e-04 7.2e-06 6.0e-06 2.8e-07
+  sine3       6 | 6.5e-01  FAIL   1.0e+00 6.7e-01 7.2e-01 7.3e-01 5.5e-02 4.5e-02 9.3e-03 6.8e-03 2.9e-04 8.5e-04 1.8e-04
+  sine5      10 | 1.2e+00 1.7e+00 1.3e+00 1.3e+00 6.0e-01 1.2e+00 8.2e-01 8.4e-01 8.4e-01 4.0e-01 1.3e+00 5.0e-01 3.8e-02
+
+  root-displacement floor  |delta-p(x*)| / |p'(x*)|  -- the CONDITIONING of
+  the problem: how far the true root moves because the interpolant is not the
+  field.  numerator = interpolation discrepancy AT the root; denominator =
+  crossing steepness (1/|p'| is the root condition number).  A route sitting
+  ON this floor is exact -- the remaining error is interpolation, not solving.
+  (inf = double root, where p'(x*)=0 and the linear theory fails; see
+  gllbase.root_error_floor.)
+
+  poly5       5 | 4.4e-01 1.3e+00 6.6e-16 4.6e-16 9.9e-16 5.7e-16 1.7e-15 1.2e-15 1.6e-15 8.9e-16 2.1e-15 1.6e-15 3.2e-15
+  tangent     3 | 2.5e-01 1.5e-01 1.2e+00 6.2e-02 3.7e-01 2.2e-01 1.2e-01 7.4e-01 7.1e-01 1.0e-02 3.0e-02 9.0e-01 1.9e-01
+  gauss       2 | 2.7e-01 1.3e-01 5.2e-02 2.8e-02 2.4e-03 4.6e-03 1.6e-03 3.4e-04 2.1e-04 1.1e-04 7.2e-06 1.4e-05 2.6e-06
+  tanh        1 | 9.3e-02 1.4e-01 1.8e-02 3.8e-02 2.8e-02 3.6e-03 2.6e-02 2.0e-03 1.3e-02 1.1e-03 4.5e-03 3.2e-03 7.7e-04
+  runge       2 | 9.3e+00 5.2e-01 1.5e-01 2.3e-01 1.6e-01 1.2e-01 8.2e-02 6.9e-02 3.8e-02 4.0e-02 1.3e-02 2.3e-02 2.8e-04
+  sine2       4 | 4.4e+00 2.9e+00 1.6e-01 1.4e-01 1.4e-02 1.5e-02 1.9e-03 1.6e-03 2.4e-04 1.2e-04 7.2e-06 6.0e-06 2.8e-07
+  sine3       6 | 1.3e+00 2.9e+01 5.5e-01 1.1e+00 6.0e-01 4.3e-01 7.3e-02 4.1e-02 9.6e-03 6.7e-03 2.9e-04 8.4e-04 1.8e-04
+  sine5      10 | 3.3e+00 4.4e+00 1.5e+00 8.3e+00 4.4e+00 1.2e+00 2.0e+00 6.0e-01 1.8e+00 3.0e+00 3.7e-01 3.2e-01 4.8e-02
+
+  (missed / spurious roots, blank = clean)
+  poly5         | 2/0     2/0             1/0                                                                            
+  tangent       |         1/0     1/0     1/0     0/1     1/0     1/0     0/1     1/0     0/1     0/1     0/1     1/0    
+  runge         | 2/0                                                                                                    
+  sine2         | 2/0     2/0                                                                                            
+  sine3         | 4/0     6/0     4/0     2/0     2/0     2/0                                                            
+  sine5         | 8/0     8/0     6/0     6/0     6/0     6/0     4/0     4/0     4/0     2/0             2/0            
+
+=== route A PLAIN (no deflation): cost per solve (1 core, median of 7 batches) ===
+
+  WARNING: this measures PYTHON dispatch, not the algorithm.  A route built
+  from many small numpy calls (route C: ~600-1600 per solve) is penalised
+  100x against one that makes a single LAPACK call (routes A and B).  Check
+  the implied flop rate: anything under ~100 Mflop/s on a modern core is
+  overhead.  For a real cost see demo_C/aberth_bench.c and notes/12.
+
+    N    us/solve   solves/s    nnz / dense      model flops
+  ----------------------------------------------------------
+    3       19.5      51355      6 /    9 (66.7%)        392
+    4       22.2      44977      9 /   16 (56.2%)        903
+    5       23.9      41761     12 /   25 (48.0%)       1739
+    6       24.9      40109     15 /   36 (41.7%)       2978
+    7       26.6      37572     18 /   49 (36.7%)       4701
+    8       27.7      36166     21 /   64 (32.8%)       6989
+    9       29.0      34437     24 /   81 (29.6%)       9920
+   10       32.2      31035     27 /  100 (27.0%)      13575
+   11       32.5      30741     30 /  121 (24.8%)      18035
+   12       37.3      26780     33 /  144 (22.9%)      23378
+   13       38.0      26343     36 /  169 (21.3%)      29685
+   14       46.8      21383     39 /  196 (19.9%)      37037
+   15       50.1      19942     42 /  225 (18.7%)      45512
+
+  eigensolver: LAPACK dgeev on an NxN non-symmetric matrix
+               (tridiagonal + full last row, nnz = 3N-3)
+               = dgebal (balance) + dgehrd (Hessenberg) + dhseqr (Francis QR)
+               balancing is essential -- see route_a.py
+
+=== route A: deflation (a_floor = 1e-12) ===
+
+  Deflation drops trailing Legendre coefficients below a_floor*max|a|
+  BEFORE building the comrade matrix, so the division in the last row is
+  by a genuine leading coefficient instead of by roundoff.
+
+  field       N   |a_N|/max   deg  fired |  plain A     deflated    route B
+  ----------------------------------------------------------------------------
+  poly5       3    1.00e+00    3     -  |  4.84e-01     4.84e-01    4.84e-01
+  poly5       5    1.00e+00    5     -  |  9.99e-16     9.99e-16    6.66e-16
+  poly5       6    8.20e-17    5    yes |  4.20e-01  *  1.11e-15    1.11e-15
+  poly5       8    1.42e-15    5    yes |  1.85e-12  *  5.55e-16    8.88e-16
+  poly5      11    2.21e-15    5    yes |  6.99e-15     2.22e-15    1.44e-15
+  poly5      15    3.74e-15    5    yes |  3.89e-15     2.05e-15    2.11e-15
+  gauss       3    6.69e-01    3     -  |  1.77e-01     1.77e-01    1.77e-01
+  gauss       5    2.48e-01    5     -  |  5.06e-02     5.06e-02    5.06e-02
+  gauss       6    1.41e-01    6     -  |  2.83e-02     2.83e-02    2.83e-02
+  gauss       8    3.05e-02    8     -  |  4.60e-03     4.60e-03    4.60e-03
+  gauss      11    4.91e-03   11     -  |  2.09e-04     2.09e-04    2.09e-04
+  gauss      15    1.18e-04   15     -  |  2.65e-06     2.65e-06    2.65e-06
+  tanh        3    3.46e-01    3     -  |  9.01e-02     9.01e-02    9.01e-02
+  tanh        5    1.50e-01    5     -  |  1.75e-02     1.75e-02    1.75e-02
+  tanh        6    2.11e-01    6     -  |  3.78e-02     3.78e-02    3.78e-02
+  tanh        8    1.35e-01    8     -  |  3.59e-03     3.59e-03    3.59e-03
+  tanh       11    3.81e-02   11     -  |  1.32e-02     1.32e-02    1.32e-02
+  tanh       15    2.05e-02   15     -  |  7.71e-04     7.71e-04    7.71e-04
+  runge       3    2.04e-01    3     -  |       inf          inf         inf
+  runge       5    4.40e-01    5     -  |  1.74e-01     1.74e-01    1.74e-01
+  runge       6    4.97e-01    6     -  |  1.57e-01     1.57e-01    1.57e-01
+  runge       8    3.56e-01    8     -  |  9.94e-02     9.94e-02    9.94e-02
+  runge      11    3.21e-01   11     -  |  3.74e-02     3.74e-02    3.74e-02
+  runge      15    1.89e-01   15     -  |  2.81e-04     2.81e-04    2.81e-04
+  sine2       3    6.91e-01    3     -  |  1.20e+00     1.20e+00    1.20e+00
+  sine2       5    1.00e+00    5     -  |  1.41e-01     1.41e-01    1.41e-01
+  sine2       6    4.12e-01    6     -  |  1.49e-01     1.49e-01    1.49e-01
+  sine2       8    6.99e-02    8     -  |  1.55e-02     1.55e-02    1.55e-02
+  sine2      11    1.05e-02   11     -  |  2.42e-04     2.42e-04    2.42e-04
+  sine2      15    4.46e-05   15     -  |  2.84e-07     2.84e-07    2.84e-07
+  sine3       3    1.00e+00    3     -  |  6.49e-01     6.49e-01    6.49e-01
+  sine3       5    2.37e-01    5     -  |  1.00e+00     1.00e+00    1.00e+00
+  sine3       6    2.94e-01    6     -  |  6.65e-01     6.65e-01    6.65e-01
+  sine3       8    9.54e-01    8     -  |  7.34e-01     7.34e-01    7.34e-01
+  sine3      11    2.73e-01   11     -  |  9.34e-03     9.34e-03    9.34e-03
+  sine3      15    8.14e-03   15     -  |  1.80e-04     1.80e-04    1.80e-04
+  sine5       3    1.00e+00    3     -  |  1.22e+00     1.22e+00    1.22e+00
+  sine5       5    3.63e-01    5     -  |  1.33e+00     1.33e+00    1.33e+00
+  sine5       6    4.73e-01    6     -  |  1.33e+00     1.33e+00    1.33e+00
+  sine5       8    2.38e-01    8     -  |  1.16e+00     1.16e+00    1.16e+00
+  sine5      11    2.76e-01   11     -  |  8.36e-01     8.36e-01    8.36e-01
+  sine5      15    5.97e-01   15     -  |  3.77e-02     3.77e-02    3.77e-02
+  tangent     3    1.00e+00    3     -  |  4.24e-09     4.24e-09    9.88e-09
+  tangent     5    1.11e-15    3    yes |  6.85e-09     1.67e-08    1.10e-08
+  tangent     6    6.94e-17    3    yes |  2.01e-12  *  7.77e-16    5.55e-16
+  tangent     8    6.59e-16    3    yes |  8.10e-14     3.40e-09    8.85e-09
+  tangent    11    2.69e-15    3    yes |  8.88e-16     1.50e-08    2.42e-08
+  tangent    15    9.02e-16    3    yes |  1.87e-14     2.22e-15    2.04e-08
+
+  deflation fired on 9/48 cases; materially improved the answer on 3 (* rows)
+  threshold justification: see route_a.py docstring (20,000-draw sweep)
+
+=== route A PLAIN (no deflation): degeneracy -- top mode a_N -> 0  (N=7) ===
+
+  reference roots (a_N = 0 exactly): [-0.22549419  0.21501982]
+
+      a_N      status   #roots   roots in [-1,1]                  err vs ref
+  ----------------------------------------------------------------------------
+    1.0e-02   ok        2       -0.223398105, +0.217730105       2.7e-03
+    1.0e-04   ok        2       -0.225473359, +0.215047017       2.7e-05
+    1.0e-06   ok        2       -0.225493980, +0.215020093       2.7e-07
+    1.0e-08   ok        2       -0.225494187, +0.215019824       2.8e-09
+    1.0e-10   ok        2       -0.225494185, +0.215019822       4.7e-09
+    1.0e-12   ok        2       -0.225493799, +0.215020566       7.4e-07
+    1.0e-14   ok        2       -0.225385799, +0.215025714       1.1e-04
+    0.0e+00   ok        2       -0.225835928, +0.214732489       3.4e-04
+
+  PLAIN route A divides by a_N (the spill-over row) and degrades as it
+  shrinks.  Deflation (the default) removes this; re-run without --plain.
+
+=== route A PLAIN (no deflation): vs reference methods -- max |root error| (miss/spurious) ===
+
+  field       N  |  this route          monomial companion   dense-sample+Brent
+  ------------------------------------------------------------------------------
+  poly5       5  |  1.0e-15 0/0         4.3e-15 0/0          1.1e-16 0/0
+  poly5       8  |  1.9e-12 0/0         2.2e-14 0/0          1.1e-16 0/0
+  poly5      11  |  7.0e-15 0/0         3.1e-15 0/0          1.1e-16 0/0
+  tangent     5  |  6.8e-09 1/0         2.6e-07 0/1          2.8e-09 0/0
+  tangent     8  |  8.1e-14 1/0         1.7e-08 0/1          8.5e-14 0/0
+  tangent    11  |  8.9e-16 1/0         2.6e-08 0/1          1.4e-13 0/0
+  gauss       5  |  5.1e-02 0/0         5.1e-02 0/0          5.1e-02 0/0
+  gauss       8  |  4.6e-03 0/0         4.6e-03 0/0          4.6e-03 0/0
+  gauss      11  |  2.1e-04 0/0         2.1e-04 0/0          2.1e-04 0/0
+  tanh        5  |  1.7e-02 0/0         1.7e-02 0/0          1.7e-02 0/0
+  tanh        8  |  3.6e-03 0/0         3.6e-03 0/0          3.6e-03 0/0
+  tanh       11  |  1.3e-02 0/0         1.3e-02 0/0          1.3e-02 0/0
+  runge       5  |  1.7e-01 0/0         1.7e-01 0/0          1.7e-01 0/0
+  runge       8  |  9.9e-02 0/0         9.9e-02 0/0          9.9e-02 0/0
+  runge      11  |  3.7e-02 0/0         3.7e-02 0/0          3.7e-02 0/0
+  sine2       5  |  1.4e-01 0/0         1.4e-01 0/0          1.4e-01 0/0
+  sine2       8  |  1.5e-02 0/0         1.5e-02 0/0          1.5e-02 0/0
+  sine2      11  |  2.4e-04 0/0         2.4e-04 0/0          2.4e-04 0/0
+  sine3       5  |  1.0e+00 4/0         1.0e+00 4/0          1.0e+00 4/0
+  sine3       8  |  7.3e-01 2/0         7.3e-01 2/0          7.3e-01 2/0
+  sine3      11  |  9.3e-03 0/0         9.3e-03 0/0          9.3e-03 0/0
+  sine5       5  |  1.3e+00 6/0         1.3e+00 6/0          1.3e+00 6/0
+  sine5       8  |  1.2e+00 6/0         1.2e+00 6/0          1.2e+00 6/0
+  sine5      11  |  8.4e-01 4/0         8.4e-01 4/0          8.4e-01 4/0
+
+  'brent' = sample the interpolant on 2001 points, bracket sign changes.
+  That is the subgrid logic marching cubes uses; its misses are the
+  motivation for this whole project.

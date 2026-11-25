@@ -1,0 +1,10 @@
+# NekRS run output -- none of this belongs in the release
+.cache/
+dat_*/
+*.vtu
+*.f0[0-9][0-9][0-9][0-9]
+*.nek5000
+logfile
+*.log
+*.log.*
+__pycache__/

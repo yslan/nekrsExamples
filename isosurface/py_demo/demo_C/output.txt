@@ -1,0 +1,183 @@
+================================================================================
+  route C (matrix-free Ehrlich-Aberth)   [niter = 12]
+  single GLL reference element on [-1,1], orders 3,4,5,6,7,8,9,10,11,12,13,14,15
+================================================================================
+
+=== route C (matrix-free Ehrlich-Aberth): iteration count ===
+
+  Correction magnitude per iteration (N=8) -- cubic, then stalls at eps:
+
+    field    it1   it2   it3   it4   it5   it6   it7   it8   it9   it10  it11  it12
+    poly5    2e-01  5e-02  4e-04  2e-10  5e-17  3e-17  3e-17  3e-17  3e-17  3e-17  3e-17  3e-17
+    gauss    2e+00  2e+00  9e-01  1e+00  1e-01  5e-03  3e-07  2e-16  2e-16  2e-16  2e-16  2e-16
+    sine2    5e-01  3e+00  2e+00  4e-03  1e-06  4e-16  4e-16  4e-16  4e-16  4e-16  4e-16  4e-16
+    sine3    2e-01  8e-02  7e-02  5e-02  2e-03  3e-08  3e-16  4e-16  3e-16  4e-16  3e-16  4e-16
+    tanh     3e+00  2e+00  5e-01  2e-01  9e-03  1e-06  1e-16  9e-17  9e-17  9e-17  9e-17  9e-17
+
+  Root error vs fixed iteration count (route B for reference):
+
+    field      N  it=4    it=6    it=8    it=10   it=12   it=16   it=24    routeB
+    poly5      5  7e-16  7e-16  7e-16  7e-16  7e-16  7e-16  7e-16   7e-16
+    poly5      8  4e-16  4e-16  4e-16  4e-16  4e-16  4e-16  4e-16   9e-16
+    poly5     11  1e-15  1e-15  1e-15  1e-15  1e-15  1e-15  1e-15   1e-15
+    poly5     15  2e-15  2e-15  2e-15  2e-15  2e-15  2e-15  2e-15   2e-15
+    gauss      5  9e-01  5e-02  5e-02  5e-02  5e-02  5e-02  5e-02   5e-02
+    gauss      8  5e-03  5e-03  5e-03  5e-03  5e-03  5e-03  5e-03   5e-03
+    gauss     11  2e-04  2e-04  2e-04  2e-04  2e-04  2e-04  2e-04   2e-04
+    gauss     15  6e-07  3e-06  3e-06  3e-06  3e-06  3e-06  3e-06   3e-06
+    tanh       5  2e-02  2e-02  2e-02  2e-02  2e-02  2e-02  2e-02   2e-02
+    tanh       8  4e-03  4e-03  4e-03  4e-03  4e-03  4e-03  4e-03   4e-03
+    tanh      11  1e-02  1e-02  1e-02  1e-02  1e-02  1e-02  1e-02   1e-02
+    tanh      15  8e-04  8e-04  8e-04  8e-04  8e-04  8e-04  8e-04   8e-04
+    sine2      5  1e-01  1e-01  1e-01  1e-01  1e-01  1e-01  1e-01   1e-01
+    sine2      8  2e-02  2e-02  2e-02  2e-02  2e-02  2e-02  2e-02   2e-02
+    sine2     11  2e-04  2e-04  2e-04  2e-04  2e-04  2e-04  2e-04   2e-04
+    sine2     15  3e-07  3e-07  3e-07  3e-07  3e-07  3e-07  3e-07   3e-07
+    sine3      5  1e+00  1e+00  1e+00  1e+00  1e+00  1e+00  1e+00   1e+00
+    sine3      8  7e-01  7e-01  7e-01  7e-01  7e-01  7e-01  7e-01   7e-01
+    sine3     11  9e-03  9e-03  9e-03  9e-03  9e-03  9e-03  9e-03   9e-03
+    sine3     15  7e-01  2e-04  2e-04  2e-04  2e-04  2e-04  2e-04   2e-04
+    runge      5  2e-01  2e-01  2e-01  2e-01  2e-01  2e-01  2e-01   2e-01
+    runge      8  1e-01  1e-01  1e-01  1e-01  1e-01  1e-01  1e-01   1e-01
+    runge     11  4e-02  4e-02  4e-02  4e-02  4e-02  4e-02  4e-02   4e-02
+    runge     15  3e-04  3e-04  3e-04  3e-04  3e-04  3e-04  3e-04   3e-04
+
+  DEFAULT niter = 12.  Measured over 20,000 random fibers
+  (scratch/23): niter=6 -> 57 root-count mismatches vs route B, niter=8 -> 2,
+  niter>=10 -> 0 with max difference 2.0e-13.  Convergence is cubic and then
+  STALLS at machine precision, so overshooting the count is free.
+
+  figure -> ../figs/C_iterations.png
+
+=== route C (matrix-free Ehrlich-Aberth): convergence -- max |root error| vs N ===
+
+  field      nr | N=3     N=4     N=5     N=6     N=7     N=8     N=9     N=10    N=11    N=12    N=13    N=14    N=15   
+  -----------------------------------------------------------------------------------------------------------------------
+  poly5       5 | 4.8e-01 7.2e-01 6.7e-16 4.4e-16 1.1e-15 4.4e-16 1.3e-15 1.2e-15 1.4e-15 6.7e-16 1.6e-15 2.2e-15 1.8e-15
+  tangent     3 |  0.0    1.1e-16 6.7e-16 4.4e-16 4.4e-16 3.3e-16 1.6e-15 1.9e-15  0.0    4.4e-16 7.8e-16 3.3e-16 1.3e-15
+  gauss       2 | 1.8e-01 1.2e-01 5.1e-02 2.8e-02 2.4e-03 4.6e-03 1.6e-03 3.4e-04 2.1e-04 1.1e-04 7.2e-06 1.4e-05 2.6e-06
+  tanh        1 | 9.0e-02 1.4e-01 1.7e-02 3.8e-02 2.8e-02 3.6e-03 2.6e-02 2.0e-03 1.3e-02 1.1e-03 4.5e-03 3.2e-03 7.7e-04
+  runge       2 |  FAIL   2.6e-01 1.7e-01 1.6e-01 1.2e-01 9.9e-02 7.4e-02 6.3e-02 3.7e-02 3.9e-02 1.3e-02 2.3e-02 2.8e-04
+  sine2       4 | 1.2e+00 2.3e-01 1.4e-01 1.5e-01 1.5e-02 1.5e-02 1.9e-03 1.6e-03 2.4e-04 1.2e-04 7.2e-06 6.0e-06 2.8e-07
+  sine3       6 | 6.5e-01  FAIL   1.0e+00 6.7e-01 7.2e-01 7.3e-01 5.5e-02 4.5e-02 9.3e-03 6.8e-03 2.9e-04 8.5e-04 1.8e-04
+  sine5      10 | 1.2e+00 1.7e+00 1.3e+00 1.3e+00 6.0e-01 1.2e+00 8.2e-01 8.4e-01 8.4e-01 4.0e-01 1.3e+00 5.0e-01 3.8e-02
+
+  root-displacement floor  |delta-p(x*)| / |p'(x*)|  -- the CONDITIONING of
+  the problem: how far the true root moves because the interpolant is not the
+  field.  numerator = interpolation discrepancy AT the root; denominator =
+  crossing steepness (1/|p'| is the root condition number).  A route sitting
+  ON this floor is exact -- the remaining error is interpolation, not solving.
+  (inf = double root, where p'(x*)=0 and the linear theory fails; see
+  gllbase.root_error_floor.)
+
+  poly5       5 | 4.4e-01 1.3e+00 6.6e-16 4.6e-16 9.9e-16 5.7e-16 1.7e-15 1.2e-15 1.6e-15 8.9e-16 2.1e-15 1.6e-15 3.2e-15
+  tangent     3 | 2.5e-01 1.5e-01 1.2e+00 6.2e-02 3.7e-01 2.2e-01 1.2e-01 7.4e-01 7.1e-01 1.0e-02 3.0e-02 9.0e-01 1.9e-01
+  gauss       2 | 2.7e-01 1.3e-01 5.2e-02 2.8e-02 2.4e-03 4.6e-03 1.6e-03 3.4e-04 2.1e-04 1.1e-04 7.2e-06 1.4e-05 2.6e-06
+  tanh        1 | 9.3e-02 1.4e-01 1.8e-02 3.8e-02 2.8e-02 3.6e-03 2.6e-02 2.0e-03 1.3e-02 1.1e-03 4.5e-03 3.2e-03 7.7e-04
+  runge       2 | 9.3e+00 5.2e-01 1.5e-01 2.3e-01 1.6e-01 1.2e-01 8.2e-02 6.9e-02 3.8e-02 4.0e-02 1.3e-02 2.3e-02 2.8e-04
+  sine2       4 | 4.4e+00 2.9e+00 1.6e-01 1.4e-01 1.4e-02 1.5e-02 1.9e-03 1.6e-03 2.4e-04 1.2e-04 7.2e-06 6.0e-06 2.8e-07
+  sine3       6 | 1.3e+00 2.9e+01 5.5e-01 1.1e+00 6.0e-01 4.3e-01 7.3e-02 4.1e-02 9.6e-03 6.7e-03 2.9e-04 8.4e-04 1.8e-04
+  sine5      10 | 3.3e+00 4.4e+00 1.5e+00 8.3e+00 4.4e+00 1.2e+00 2.0e+00 6.0e-01 1.8e+00 3.0e+00 3.7e-01 3.2e-01 4.8e-02
+
+  (missed / spurious roots, blank = clean)
+  poly5         | 2/0     2/0                                                                                            
+  tangent       | 1/0     1/0     1/0     1/0     1/0     1/0     1/0     1/0     1/0     1/0     1/0     1/0     1/0    
+  runge         | 2/0                                                                                                    
+  sine2         | 2/0     2/0                                                                                            
+  sine3         | 4/0     6/0     4/0     2/0     2/0     2/0                                                            
+  sine5         | 8/0     8/0     6/0     6/0     6/0     6/0     4/0     4/0     4/0     2/0             2/0            
+
+  figure -> ../figs/C_convergence.png
+
+=== route C (matrix-free Ehrlich-Aberth): cost per solve (1 core, median of 7 batches) ===
+
+  WARNING: this measures PYTHON dispatch, not the algorithm.  A route built
+  from many small numpy calls (route C: ~600-1600 per solve) is penalised
+  100x against one that makes a single LAPACK call (routes A and B).  Check
+  the implied flop rate: anything under ~100 Mflop/s on a modern core is
+  overhead.  For a real cost see demo_C/aberth_bench.c and notes/12.
+
+    N    us/solve   solves/s    nnz / dense      model flops
+  ----------------------------------------------------------
+    3      467.1       2141     10 /    9 (111.1%)        216
+    4      554.0       1805     13 /   16 (81.2%)        384
+    5      625.5       1599     16 /   25 (64.0%)        600
+    6      701.0       1427     19 /   36 (52.8%)        864
+    7      783.5       1276     22 /   49 (44.9%)       1176
+    8      863.1       1159     25 /   64 (39.1%)       1536
+    9      775.5       1290     28 /   81 (34.6%)       1944
+   10      842.6       1187     31 /  100 (31.0%)       2400
+   11      928.0       1078     34 /  121 (28.1%)       2904
+   12     1012.7        987     37 /  144 (25.7%)       3456
+   13     1116.9        895     40 /  169 (23.7%)       4056
+   14     1186.2        843     43 /  196 (21.9%)       4704
+   15     1229.9        813     46 /  225 (20.4%)       5400
+
+  NO eigensolver and NO matrix: a simultaneous fixed-point iteration
+  on n complex numbers.  The 'nnz/dense' column above is repurposed as
+  (per-fiber state in doubles) / (route A's matrix entries) for contrast.
+  Work is O(niter * n^2), against O(n^3) for any dense eigensolver.
+  figure -> ../figs/C_cost.png
+
+=== route C (matrix-free Ehrlich-Aberth): GPU budget (one fiber per thread) ===
+
+  Per-thread state, in doubles.  A CUDA thread has ~255 32-bit registers
+  ~ 128 doubles before spilling to local memory.
+
+     N   route C (~3N)   route A (N^2)   route B (2(N+2)^2)   fibers/elem
+  ------------------------------------------------------------------------
+     5            16              25                   98  SPILL       108
+     8            25              64                  200  SPILL       243
+    11            34             121                  338  SPILL       432
+    15            46             225  SPILL           578  SPILL       768
+
+  Work per fiber (model flops):
+
+     N   route C (Aberth)   dense QR (~10N^3)   ratio
+  ----------------------------------------------------
+     5                600                1250    2.08x
+     8               1536                5120    3.33x
+    11               2904               13310    4.58x
+    15               5400               33750    6.25x
+
+  Total fibers for this mesh (864 elements, 3(N+1)^2 per element):
+    N= 5:     93312 independent rootfinding problems
+    N= 8:    209952 independent rootfinding problems
+    N=11:    373248 independent rootfinding problems
+    N=15:    663552 independent rootfinding problems
+
+  Branches in the hot loop: NONE (fixed count, no pivoting, no shifts,
+  no deflation-during-iteration, no convergence test).
+
+=== route C (matrix-free Ehrlich-Aberth): vs reference methods -- max |root error| (miss/spurious) ===
+
+  field       N  |  this route          monomial companion   dense-sample+Brent
+  ------------------------------------------------------------------------------
+  poly5       5  |  6.7e-16 0/0         4.3e-15 0/0          1.1e-16 0/0
+  poly5       8  |  4.4e-16 0/0         2.2e-14 0/0          1.1e-16 0/0
+  poly5      11  |  1.4e-15 0/0         3.1e-15 0/0          1.1e-16 0/0
+  tangent     5  |  6.7e-16 1/0         2.6e-07 0/1          2.8e-09 0/0
+  tangent     8  |  3.3e-16 1/0         1.7e-08 0/1          8.5e-14 0/0
+  tangent    11  |   0.0    1/0         2.6e-08 0/1          1.4e-13 0/0
+  gauss       5  |  5.1e-02 0/0         5.1e-02 0/0          5.1e-02 0/0
+  gauss       8  |  4.6e-03 0/0         4.6e-03 0/0          4.6e-03 0/0
+  gauss      11  |  2.1e-04 0/0         2.1e-04 0/0          2.1e-04 0/0
+  tanh        5  |  1.7e-02 0/0         1.7e-02 0/0          1.7e-02 0/0
+  tanh        8  |  3.6e-03 0/0         3.6e-03 0/0          3.6e-03 0/0
+  tanh       11  |  1.3e-02 0/0         1.3e-02 0/0          1.3e-02 0/0
+  runge       5  |  1.7e-01 0/0         1.7e-01 0/0          1.7e-01 0/0
+  runge       8  |  9.9e-02 0/0         9.9e-02 0/0          9.9e-02 0/0
+  runge      11  |  3.7e-02 0/0         3.7e-02 0/0          3.7e-02 0/0
+  sine2       5  |  1.4e-01 0/0         1.4e-01 0/0          1.4e-01 0/0
+  sine2       8  |  1.5e-02 0/0         1.5e-02 0/0          1.5e-02 0/0
+  sine2      11  |  2.4e-04 0/0         2.4e-04 0/0          2.4e-04 0/0
+  sine3       5  |  1.0e+00 4/0         1.0e+00 4/0          1.0e+00 4/0
+  sine3       8  |  7.3e-01 2/0         7.3e-01 2/0          7.3e-01 2/0
+  sine3      11  |  9.3e-03 0/0         9.3e-03 0/0          9.3e-03 0/0
+  sine5       5  |  1.3e+00 6/0         1.3e+00 6/0          1.3e+00 6/0
+  sine5       8  |  1.2e+00 6/0         1.2e+00 6/0          1.2e+00 6/0
+  sine5      11  |  8.4e-01 4/0         8.4e-01 4/0          8.4e-01 4/0
+
+  'brent' = sample the interpolant on 2001 points, bracket sign changes.
+  That is the subgrid logic marching cubes uses; its misses are the
+  motivation for this whole project.

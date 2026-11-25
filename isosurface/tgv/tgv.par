@@ -1,0 +1,37 @@
+# Taylor-Green vortex, Re = 1600, 8^3 elements at N = 7.
+#
+# Cut down from examples/tgv to demonstrate the isosurface plugin: no
+# regularization, no casedata, no .usr.  It is NOT a validated TGV solution --
+# see README.md.
+
+[GENERAL]
+polynomialOrder = 7
+cubaturePolynomialOrder = 9
+
+stopAt = endTime
+endTime = 20
+
+timeStepper = tombo3
+dt = 2e-3
+
+# THE KNOB THAT MATTERS FOR THIS EXAMPLE.
+# The .udf writes an isosurface on every checkpoint step, so this interval
+# controls BOTH the .fld series and the isosurface series.  The reference case
+# has checkpointInterval = 0, i.e. checkpoints OFF -- with that, the run
+# completes and writes nothing at all.
+checkpointControl = simulationTime
+checkpointInterval = 2.0
+
+[MESH]
+#hRefine = 2
+
+[FLUID PRESSURE]
+residualTol = 1e-04
+solver = cg+flexible
+smootherType = Jac+Cheby
+
+[FLUID VELOCITY]
+boundaryTypeMap = none
+rho = 1.0
+viscosity = 1/1600
+residualTol = 1e-06
